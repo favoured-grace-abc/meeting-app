@@ -5,10 +5,13 @@ import TextField from '@mui/material/TextField';
 import IconButton from '@mui/material/IconButton';
 import SendIcon from '@mui/icons-material/Send';
 import ChatBubbleOutlineOutlinedIcon from '@mui/icons-material/ChatBubbleOutlineOutlined';
+import VolumeUpIcon from '@mui/icons-material/VolumeUp';
 import { useAuth } from '../../contexts/AuthContext';
+import { useTTS } from '../../hooks/useVoice';
 
 export default function ChatPanel({ messages, onSendMessage }) {
   const { user } = useAuth();
+  const { speak, stop, playing } = useTTS();
   const [input, setInput] = useState('');
   const bottomRef = useRef(null);
 
@@ -89,7 +92,26 @@ export default function ChatPanel({ messages, onSendMessage }) {
                           {msg.senderName}
                         </Typography>
                       )}
-                      <Typography variant="body2">{msg.content}</Typography>
+                      <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.5 }}>
+                        <Typography variant="body2" sx={{ flex: 1 }}>
+                          {msg.content}
+                        </Typography>
+                        {msg.type !== 'system' && (
+                          <IconButton
+                            size="small"
+                            onClick={() => playing === msg.id ? stop() : speak(msg.content, msg.id)}
+                            sx={{
+                              width: 22,
+                              height: 22,
+                              mt: -0.25,
+                              color: playing === msg.id ? 'primary.light' : 'grey.600',
+                              '&:hover': { color: 'grey.400' },
+                            }}
+                          >
+                            <VolumeUpIcon sx={{ fontSize: 14 }} />
+                          </IconButton>
+                        )}
+                      </Box>
                     </>
                   )}
                 </Box>

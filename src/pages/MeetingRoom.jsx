@@ -6,6 +6,12 @@ import IconButton from '@mui/material/IconButton';
 import Tooltip from '@mui/material/Tooltip';
 import CircularProgress from '@mui/material/CircularProgress';
 import Button from '@mui/material/Button';
+import Dialog from '@mui/material/Dialog';
+import DialogTitle from '@mui/material/DialogTitle';
+import DialogContent from '@mui/material/DialogContent';
+import DialogActions from '@mui/material/DialogActions';
+import Chip from '@mui/material/Chip';
+import Alert from '@mui/material/Alert';
 import MicIcon from '@mui/icons-material/Mic';
 import MicOffIcon from '@mui/icons-material/MicOff';
 import VideocamIcon from '@mui/icons-material/Videocam';
@@ -17,9 +23,12 @@ import CallEndIcon from '@mui/icons-material/CallEnd';
 import LogoutIcon from '@mui/icons-material/Logout';
 import { useAuth } from '../contexts/AuthContext';
 import { useMeeting, useLiveKit } from '../hooks/useMeeting';
+import { useVoice, useLLM } from '../hooks/useVoice';
 import { getLiveKitToken, endMeeting } from '../services/livekit';
 import VideoGrid, { EmptyVideoGrid } from '../components/meeting/VideoGrid';
 import ChatPanel from '../components/meeting/ChatPanel';
+import CaptionsOverlay from '../components/meeting/CaptionsOverlay';
+import VoiceControls from '../components/meeting/VoiceControls';
 
 export default function MeetingRoom() {
   const { meetingId } = useParams();
@@ -34,6 +43,23 @@ export default function MeetingRoom() {
   const [micOn, setMicOn] = useState(true);
   const [camOn, setCamOn] = useState(true);
   const [screenShareOn, setScreenShareOn] = useState(false);
+  const [summaryOpen, setSummaryOpen] = useState(false);
+
+  const {
+    captionsEnabled,
+    caption,
+    captionsHistory,
+    sttError,
+    toggleCaptions,
+  } = useVoice();
+
+  const {
+    summarize,
+    clear: clearSummary,
+    processing: llmProcessing,
+    result: llmResult,
+    error: llmError,
+  } = useLLM();
 
   useEffect(() => {
     if (!meeting || !user || isConnected || connecting) return;
@@ -85,6 +111,22 @@ export default function MeetingRoom() {
     setScreenShareOn(!screenShareOn);
   };
 
+  const handleSummarize = async () => {
+    setSummaryOpen(true);
+    if (!llmResult && messages.length > 0) {
+      const transcript = messages
+        .filter((m) => m.type === 'text')
+        .map((m) => `${m.senderName}: ${m.content}`)
+        .join('\n');
+      await summarize(transcript);
+    }
+  };
+
+  const handleCloseSummary = () => {
+    setSummaryOpen(false);
+    clearSummary();
+  };
+
   if (loading) {
     return (
       <Box sx={{ display: 'flex', height: '100vh', alignItems: 'center', justifyContent: 'center', bgcolor: 'background.default' }}>
@@ -131,6 +173,12 @@ export default function MeetingRoom() {
             ) : (
               <EmptyVideoGrid />
             )}
+            {captionsEnabled && (
+              <CaptionsOverlay
+                caption={caption}
+                history={captionsHistory}
+              />
+            )}
           </Box>
 
           <Box
@@ -168,6 +216,14 @@ export default function MeetingRoom() {
                 {screenShareOn ? <StopScreenShareIcon /> : <ScreenShareIcon />}
               </IconButton>
             </Tooltip>
+            <VoiceControls
+              captionsEnabled={captionsEnabled}
+              sttError={sttError}
+              onToggleCaptions={toggleCaptions}
+              llmProcessing={llmProcessing}
+              onSummarize={handleSummarize}
+            />
+
             <Tooltip title={showChat ? 'Hide Chat' : 'Show Chat'}>
               <IconButton
                 onClick={() => setShowChat(!showChat)}
@@ -223,7 +279,47 @@ export default function MeetingRoom() {
             <ChatPanel messages={messages} onSendMessage={sendMessage} />
           </Box>
         )}
+
+        {sttError && (
+          <Alert
+            severity="warning"
+            sx={{
+              position: 'absolute',
+              bottom: 80,
+              left: '50%',
+              transform: 'translateX(-50%)',
+              zIndex: 30,
+              maxWidth: 400,
+            }}
+          >
+            {sttError}
+          </Alert>
+        )}
       </Box>
+
+      <Dialog open={summaryOpen} onClose={handleCloseSummary} maxWidth="md" fullWidth>
+        <DialogTitle>AI Meeting Summary</DialogTitle>
+        <DialogContent dividers>
+          {llmProcessing ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', py: 6 }}>
+              <CircularProgress />
+            </Box>
+          ) : llmError ? (
+            <Alert severity="error">{llmError}</Alert>
+          ) : llmResult ? (
+            <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', lineHeight: 1.8 }}>
+              {llmResult}
+            </Typography>
+          ) : (
+            <Typography color="text.secondary">
+              No messages to summarize yet.
+            </Typography>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleCloseSummary}>Close</Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
