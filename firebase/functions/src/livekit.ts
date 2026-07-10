@@ -15,7 +15,7 @@ export interface CreateTokenParams {
   metadata?: string;
 }
 
-export function generateJoinToken(params: CreateTokenParams): string {
+export async function generateJoinToken(params: CreateTokenParams): Promise<string> {
   const at = new AccessToken(config.livekit.apiKey, config.livekit.apiSecret, {
     identity: params.identity,
     name: params.displayName,
@@ -30,10 +30,10 @@ export function generateJoinToken(params: CreateTokenParams): string {
     canPublishData: true,
   });
 
-  return at.toJwt();
+  return await at.toJwt();
 }
 
-export function generateAdminToken(roomName: string): string {
+export async function generateAdminToken(roomName: string): Promise<string> {
   const at = new AccessToken(config.livekit.apiKey, config.livekit.apiSecret, {
     identity: `admin-${uuidv4()}`,
     name: 'Admin',
@@ -48,7 +48,7 @@ export function generateAdminToken(roomName: string): string {
     canUpdateOwnMetadata: true,
   });
 
-  return at.toJwt();
+  return await at.toJwt();
 }
 
 export async function createRoom(roomName: string): Promise<void> {

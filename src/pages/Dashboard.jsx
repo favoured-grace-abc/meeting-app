@@ -10,7 +10,7 @@ import Chip from '@mui/material/Chip';
 import Grid from '@mui/material/Grid';
 import CircularProgress from '@mui/material/CircularProgress';
 import Alert from '@mui/material/Alert';
-import VideocamIcon from '@mui/icons-material/Videocam';
+import MicIcon from '@mui/icons-material/Mic';
 import CalendarMonthIcon from '@mui/icons-material/CalendarMonth';
 import { useAuth } from '../contexts/AuthContext';
 import { getUserMeetings, getDocs } from '../services/firebase';
@@ -154,12 +154,12 @@ export default function Dashboard() {
         <Button
           variant="contained"
           size="large"
-          startIcon={creating ? <CircularProgress size={18} color="inherit" /> : <VideocamIcon />}
+          startIcon={creating ? <CircularProgress size={18} color="inherit" /> : <MicIcon />}
           onClick={handleInstantMeeting}
           disabled={creating}
           sx={{ px: 4, py: 1.5, width: { xs: '100%', sm: 'auto' } }}
         >
-          {creating ? 'Creating...' : 'New Instant Meeting'}
+          {creating ? 'Creating...' : 'New Recording Session'}
         </Button>
         <Button
           variant="outlined"
@@ -210,7 +210,7 @@ export default function Dashboard() {
             No meetings yet
           </Typography>
           <Typography variant="body2" color="text.disabled" sx={{ mt: 1 }}>
-            Start an instant meeting or schedule one for later.
+            Start a recording session or schedule one for later.
           </Typography>
         </Card>
       ) : (

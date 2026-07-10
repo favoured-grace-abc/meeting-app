@@ -49,7 +49,7 @@ function LandingPage() {
           variant="body1"
           sx={{ color: 'text.secondary', mb: 4, lineHeight: 1.6 }}
         >
-          Real-time video collaboration with AI-powered transcription and summaries.
+          AI-powered audio recording with real-time speaker identification and transcription.
         </Typography>
         <Button
           variant="contained"

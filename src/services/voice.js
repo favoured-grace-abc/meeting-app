@@ -14,6 +14,20 @@ export async function speechToText(audioBlob) {
   return data.text;
 }
 
+export async function speechToTextWithDiarization(audioBlob) {
+  const res = await fetch(`${VOICE_SERVER}/stt-diarize`, {
+    method: 'POST',
+    headers: { 'Content-Type': audioBlob.type || 'audio/webm' },
+    body: audioBlob,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'STT diarization failed');
+  }
+  const data = await res.json();
+  return data;
+}
+
 export async function textToSpeech(text) {
   const res = await fetch(`${VOICE_SERVER}/tts`, {
     method: 'POST',

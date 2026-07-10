@@ -1,12 +1,15 @@
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
-import { onDocumentCreated, onDocumentUpdated } from 'firebase-functions/v2/firestore';
+import { onDocumentCreated } from 'firebase-functions/v2/firestore';
 import { onRequest } from 'firebase-functions/v2/https';
 import { initializeApp } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
 import { v4 as uuidv4 } from 'uuid';
-import { generateJoinToken, createRoom } from './livekit.js';
+import { createHmac, timingSafeEqual } from 'node:crypto';
+import express from 'express';
+import { generateJoinToken, createRoom, endRoom } from './livekit.js';
 import { transcribeAudio, generateSummary } from './transcription.js';
+import { config } from './config.js';
 
 initializeApp();
 const db = getFirestore();
@@ -171,6 +174,12 @@ export const endMeeting = onCall(async (request) => {
     updatedAt: new Date(),
   });
 
+  try {
+    await endRoom(meetingData.roomName);
+  } catch (error) {
+    console.error('Failed to delete LiveKit room:', error);
+  }
+
   return { success: true };
 });
 
@@ -249,13 +258,32 @@ export const processRecording = onDocumentCreated(
 // ============================================================
 // Webhook receiver for LiveKit events
 // ============================================================
-export const livekitWebhook = onRequest(async (req, res) => {
-  if (req.method !== 'POST') {
-    res.status(405).send('Method Not Allowed');
-    return;
+const webhookApp = express();
+webhookApp.use(express.raw({ type: 'application/json' }));
+
+webhookApp.post('/', async (req: express.Request, res: express.Response) => {
+  const rawBody = (req.body as Buffer).toString();
+  const signature = req.headers['livekit-webhook-signature'] as string;
+
+  if (config.webhook.secret && signature) {
+    const expectedSig = createHmac('sha256', config.webhook.secret)
+      .update(rawBody)
+      .digest('hex');
+    const expected = Buffer.from(expectedSig);
+    const actual = Buffer.from(signature);
+    if (expected.length === actual.length && !timingSafeEqual(expected, actual)) {
+      res.status(401).json({ error: 'Invalid webhook signature' });
+      return;
+    }
   }
 
-  const event = req.body;
+  let event: any;
+  try {
+    event = JSON.parse(rawBody);
+  } catch {
+    res.status(400).send('Invalid JSON payload');
+    return;
+  }
 
   if (!event || !event.event) {
     res.status(400).send('Invalid webhook payload');
@@ -358,3 +386,5 @@ export const livekitWebhook = onRequest(async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+export const livekitWebhook = onRequest(webhookApp);

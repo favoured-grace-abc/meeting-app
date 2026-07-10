@@ -6,15 +6,47 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || 'your-api-key';
-const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || 'your-api-secret';
-const LIVEKIT_SERVER_URL = process.env.LIVEKIT_SERVER_URL || 'wss://your-livekit-instance.com';
+// Rate limiting (simple in-memory)
+const rateLimitMap = new Map();
+function rateLimit(limit, windowMs) {
+  return (req, res, next) => {
+    const ip = req.ip || req.connection.remoteAddress;
+    const now = Date.now();
+    const entry = rateLimitMap.get(ip) || { count: 0, resetAt: now + windowMs };
+    if (now > entry.resetAt) {
+      entry.count = 0;
+      entry.resetAt = now + windowMs;
+    }
+    entry.count++;
+    rateLimitMap.set(ip, entry);
+    if (entry.count > limit) {
+      return res.status(429).json({ error: 'Too many requests' });
+    }
+    next();
+  };
+}
 
-app.post('/token', (req, res) => {
+const requiredEnvVars = ['LIVEKIT_API_KEY', 'LIVEKIT_API_SECRET', 'LIVEKIT_SERVER_URL'];
+for (const envVar of requiredEnvVars) {
+  if (!process.env[envVar]) {
+    console.error(`FATAL: Missing required environment variable: ${envVar}`);
+    process.exit(1);
+  }
+}
+
+const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY;
+const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET;
+const LIVEKIT_SERVER_URL = process.env.LIVEKIT_SERVER_URL;
+
+app.post('/token', rateLimit(30, 60000), (req, res) => {
   const { roomName, identity, displayName } = req.body;
 
   if (!roomName || !identity) {
     return res.status(400).json({ error: 'roomName and identity are required' });
+  }
+
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(roomName)) {
+    return res.status(400).json({ error: 'Invalid room name format' });
   }
 
   const at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {

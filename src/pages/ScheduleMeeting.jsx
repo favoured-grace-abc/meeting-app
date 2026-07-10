@@ -7,11 +7,9 @@ import Button from '@mui/material/Button';
 import Alert from '@mui/material/Alert';
 import Paper from '@mui/material/Paper';
 import EventIcon from '@mui/icons-material/Event';
-import { useAuth } from '../contexts/AuthContext';
 import { scheduleMeeting } from '../services/livekit';
 
 export default function ScheduleMeeting() {
-  const { user } = useAuth();
   const navigate = useNavigate();
   const [form, setForm] = useState({
     title: '',
@@ -31,7 +29,7 @@ export default function ScheduleMeeting() {
     setError(null);
 
     if (!form.title.trim()) {
-      setError('Meeting title is required.');
+      setError('Session title is required.');
       return;
     }
     if (!form.scheduledAt) {
@@ -47,7 +45,6 @@ export default function ScheduleMeeting() {
       await scheduleMeeting({
         title: form.title.trim(),
         description: form.description.trim(),
-        hostId: user.id,
         scheduledAt: scheduledAt.toISOString(),
       });
       navigate('/dashboard');
@@ -68,11 +65,11 @@ export default function ScheduleMeeting() {
       >
         <Typography variant="h6" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
           <EventIcon fontSize="small" />
-          Schedule a Meeting
+          Schedule a Recording Session
         </Typography>
 
         <TextField
-          label="Meeting Title"
+          label="Session Title"
           name="title"
           value={form.title}
           onChange={handleChange}
@@ -127,7 +124,7 @@ export default function ScheduleMeeting() {
             disabled={submitting}
             sx={{ flex: 1 }}
           >
-            {submitting ? 'Scheduling...' : 'Schedule Meeting'}
+            {submitting ? 'Scheduling...' : 'Schedule Session'}
           </Button>
           <Button
             variant="outlined"

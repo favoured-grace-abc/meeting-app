@@ -1,90 +1,47 @@
+import { getFunctions, httpsCallable } from 'firebase/functions';
+import { app } from './firebase';
 import { Room, RoomEvent } from 'livekit-client';
-import { db, collection, addDoc, doc, updateDoc, serverTimestamp } from './firebase';
 
-const TOKEN_SERVER =
-  import.meta.env.VITE_LIVEKIT_TOKEN_SERVER || 'http://localhost:4000';
+const functions = getFunctions(app);
+
+const callCreateInstantMeeting = httpsCallable(functions, 'createInstantMeeting');
+const callScheduleMeeting = httpsCallable(functions, 'scheduleMeeting');
+const callEndMeeting = httpsCallable(functions, 'endMeeting');
+const callGetLiveKitToken = httpsCallable(functions, 'getLiveKitToken');
 
 export async function getLiveKitToken(roomName, identity, displayName) {
-  const res = await fetch(`${TOKEN_SERVER}/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ roomName, identity, displayName }),
-  });
-  if (!res.ok) throw new Error(`Token server error: ${res.statusText}`);
-  return res.json();
+  const result = await callGetLiveKitToken({ roomName, metadata: JSON.stringify({ displayName }) });
+  return result.data;
 }
 
 export async function createInstantMeeting(hostId, title) {
-  const roomName = `meeting-${crypto.randomUUID()}`;
-  const meetingRef = await addDoc(collection(db, 'meetings'), {
-    title: title || 'Instant Meeting',
-    description: '',
-    hostId,
-    scheduledAt: null,
-    startedAt: serverTimestamp(),
-    endedAt: null,
-    status: 'active',
-    roomName,
-    recordingEnabled: false,
-    maxParticipants: 50,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
-
-  await addDoc(collection(db, 'meetings', meetingRef.id, 'participants'), {
-    displayName: 'Host',
-    joinedAt: serverTimestamp(),
-    leftAt: null,
-    role: 'host',
-    isMuted: false,
-    isVideoOn: true,
-  });
-
-  return { meetingId: meetingRef.id, roomName };
+  const result = await callCreateInstantMeeting({ title, recordingEnabled: true });
+  return result.data;
 }
 
 export async function endMeeting(meetingId) {
-  await updateDoc(doc(db, 'meetings', meetingId), {
-    status: 'ended',
-    endedAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
+  await callEndMeeting({ meetingId });
 }
 
 export async function scheduleMeeting(data) {
-  const roomName = `meeting-${crypto.randomUUID()}`;
-  const meetingRef = await addDoc(collection(db, 'meetings'), {
+  const result = await callScheduleMeeting({
     title: data.title,
-    description: data.description || '',
-    hostId: data.hostId,
+    description: data.description,
     scheduledAt: data.scheduledAt,
-    startedAt: null,
-    endedAt: null,
-    status: 'scheduled',
-    roomName,
-    recordingEnabled: false,
-    maxParticipants: 50,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
   });
-
-  return { meetingId: meetingRef.id, roomName };
+  return result.data;
 }
 
 export class LiveKitService {
   constructor() {
     this.room = null;
     this.audioTrack = null;
-    this.videoTrack = null;
   }
 
   async connectToRoom(token, serverUrl) {
     this.room = new Room({
       adaptiveStream: true,
       dynacast: true,
-      videoCaptureDefaults: {
-        resolution: { width: 1280, height: 720 },
-      },
     });
 
     await this.room.connect(serverUrl, token);
@@ -110,27 +67,7 @@ export class LiveKitService {
 
   async toggleMic(enabled) {
     if (!this.room) return;
-    if (enabled) {
-      this.audioTrack = await this.room.localParticipant.enableCameraAndMicrophone();
-    } else {
-      this.room.localParticipant.setMicrophoneEnabled(false);
-    }
-  }
-
-  async toggleCamera(enabled) {
-    if (!this.room) return;
-    if (enabled) {
-      this.videoTrack = await this.room.localParticipant.setCameraEnabled(true);
-    } else {
-      this.room.localParticipant.setCameraEnabled(false);
-    }
-  }
-
-  async toggleScreenShare() {
-    if (!this.room) return;
-    await this.room.localParticipant.setScreenShareEnabled(
-      !this.room.localParticipant.isScreenShareEnabled,
-    );
+    await this.room.localParticipant.setMicrophoneEnabled(enabled);
   }
 
   cleanup() {
@@ -139,6 +76,5 @@ export class LiveKitService {
       this.room = null;
     }
     this.audioTrack = null;
-    this.videoTrack = null;
   }
 }

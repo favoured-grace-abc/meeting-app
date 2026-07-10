@@ -3,17 +3,35 @@ service firebase.storage {
   match /b/{bucket}/o {
     // Audio recordings: /recordings/{meetingId}/{recordingId}.{ext}
     match /recordings/{meetingId}/{fileName} {
-      allow read: if request.auth != null;
+      allow read: if request.auth != null
+        && firestore.exists(
+          /databases/(default)/documents/meetings/$(meetingId)
+        );
       allow write: if request.auth != null
-        && request.resource.size < 500 * 1024 * 1024; // 500MB max
-      allow delete: if request.auth != null;
+        && request.resource.size < 500 * 1024 * 1024 // 500MB max
+        && firestore.get(
+          /databases/(default)/documents/meetings/$(meetingId)
+        ).data.hostId == request.auth.uid;
+      allow delete: if request.auth != null
+        && firestore.get(
+          /databases/(default)/documents/meetings/$(meetingId)
+        ).data.hostId == request.auth.uid;
     }
 
     // Transcripts: /transcripts/{meetingId}/{recordingId}.json
     match /transcripts/{meetingId}/{fileName} {
-      allow read: if request.auth != null;
-      allow write: if request.auth != null;
-      allow delete: if request.auth != null;
+      allow read: if request.auth != null
+        && firestore.exists(
+          /databases/(default)/documents/meetings/$(meetingId)
+        );
+      allow write: if request.auth != null
+        && firestore.get(
+          /databases/(default)/documents/meetings/$(meetingId)
+        ).data.hostId == request.auth.uid;
+      allow delete: if request.auth != null
+        && firestore.get(
+          /databases/(default)/documents/meetings/$(meetingId)
+        ).data.hostId == request.auth.uid;
     }
 
     // User avatars: /avatars/{userId}/{fileName}

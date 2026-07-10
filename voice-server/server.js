@@ -1,9 +1,49 @@
 import express from 'express';
 import cors from 'cors';
+import OpenAI from 'openai';
 
 const app = express();
 app.use(cors());
+
+const requiredEnvVars = [
+  'OPENAI_API_KEY',
+  'CLOUDFLARE_ACCOUNT_ID',
+  'CLOUDFLARE_API_TOKEN',
+];
+for (const envVar of requiredEnvVars) {
+  if (!process.env[envVar]) {
+    console.error(`FATAL: Missing required environment variable: ${envVar}`);
+    process.exit(1);
+  }
+}
+
+// Rate limiting (simple in-memory)
+const rateLimitMap = new Map();
+function rateLimit(limit, windowMs) {
+  return (req, res, next) => {
+    const ip = req.ip || req.connection.remoteAddress;
+    const now = Date.now();
+    const entry = rateLimitMap.get(ip) || { count: 0, resetAt: now + windowMs };
+    if (now > entry.resetAt) {
+      entry.count = 0;
+      entry.resetAt = now + windowMs;
+    }
+    entry.count++;
+    rateLimitMap.set(ip, entry);
+    if (entry.count > limit) {
+      return res.status(429).json({ error: 'Too many requests' });
+    }
+    next();
+  };
+}
+
+app.use(rateLimit(60, 60000));
+
 app.use(express.json({ limit: '10mb' }));
+app.use(express.raw({ type: 'audio/webm', limit: '10mb' }));
+app.use(express.raw({ type: 'audio/wav', limit: '10mb' }));
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const CLOUDFLARE_API_BASE =
   `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/ai/run`;
@@ -33,9 +73,16 @@ async function runAI(model, input, contentType) {
   return res;
 }
 
+const VALID_AUDIO_TYPES = ['audio/webm', 'audio/wav', 'audio/mp3', 'audio/ogg', 'audio/mpeg'];
+
 app.post('/stt', async (req, res) => {
   try {
     const contentType = req.headers['content-type'] || 'audio/webm';
+
+    if (!VALID_AUDIO_TYPES.includes(contentType)) {
+      return res.status(400).json({ error: `Unsupported content type: ${contentType}` });
+    }
+
     const audioBuffer = req.body;
 
     if (!audioBuffer || Buffer.byteLength(audioBuffer, 'utf8') < 100) {
@@ -47,6 +94,51 @@ app.post('/stt', async (req, res) => {
     res.json({ text: result.result?.text || '' });
   } catch (err) {
     console.error('STT error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/stt-diarize', async (req, res) => {
+  try {
+    const contentType = req.headers['content-type'] || 'audio/webm';
+
+    if (!VALID_AUDIO_TYPES.includes(contentType)) {
+      return res.status(400).json({ error: `Unsupported content type: ${contentType}` });
+    }
+
+    const audioBuffer = req.body;
+
+    if (!audioBuffer || Buffer.byteLength(audioBuffer, 'utf8') < 100) {
+      return res.status(400).json({ error: 'No audio data received' });
+    }
+
+    const ext = (req.headers['content-type'] || '').includes('wav') ? 'wav' : 'webm';
+
+    const file = new File([audioBuffer], `audio.${ext}`, {
+      type: `audio/${ext}`,
+    });
+
+    const transcription = await openai.audio.transcriptions.create({
+      file,
+      model: 'whisper-1',
+      response_format: 'verbose_json',
+      timestamp_granularities: ['segment'],
+      language: 'en',
+    });
+
+    const segments = (transcription.segments || []).map((seg) => ({
+      text: seg.text.trim(),
+      start: seg.start,
+      end: seg.end,
+      speaker: seg.speaker || null,
+    }));
+
+    res.json({
+      text: transcription.text || '',
+      segments,
+    });
+  } catch (err) {
+    console.error('STT diarize error:', err);
     res.status(500).json({ error: err.message });
   }
 });

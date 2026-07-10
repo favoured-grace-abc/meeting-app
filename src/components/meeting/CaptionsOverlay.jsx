@@ -1,45 +1,86 @@
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 
-export default function CaptionsOverlay({ caption, history }) {
-  const recent = caption || history.slice(-3).join(' ');
+export default function CaptionsOverlay({ currentCaption, history }) {
+  const recent = history.slice(-5);
 
-  if (!recent) return null;
+  if (recent.length === 0 && !currentCaption) return null;
 
   return (
     <Box
       sx={{
-        position: 'absolute',
-        bottom: 16,
-        left: '50%',
-        transform: 'translateX(-50%)',
-        maxWidth: '80%',
-        zIndex: 20,
-        pointerEvents: 'none',
+        width: '100%',
+        maxWidth: 640,
+        mx: 'auto',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 1,
+        px: 2,
       }}
     >
-      <Box
-        sx={{
-          bgcolor: 'rgba(0,0,0,0.75)',
-          backdropFilter: 'blur(4px)',
-          borderRadius: 2,
-          px: 2.5,
-          py: 1.5,
-          textAlign: 'center',
-        }}
-      >
-        <Typography
-          variant="body1"
+      {recent.map((entry) => (
+        <Box
+          key={entry.id}
+          className={entry === currentCaption ? 'caption-fade-in' : ''}
           sx={{
-            color: 'white',
-            fontSize: { xs: 14, md: 16 },
-            lineHeight: 1.5,
-            textShadow: '0 1px 3px rgba(0,0,0,0.5)',
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: 1,
+            '@keyframes fadeIn': {
+              from: { opacity: 0, transform: 'translateY(8px)' },
+              to: { opacity: 1, transform: 'translateY(0)' },
+            },
+            '&.caption-fade-in': {
+              animation: 'fadeIn 0.3s ease',
+            },
           }}
         >
-          {recent}
-        </Typography>
-      </Box>
+          <Box
+            sx={{
+              px: 1,
+              py: 0.3,
+              borderRadius: 1,
+              bgcolor: entry.speaker?.color || 'grey.600',
+              flexShrink: 0,
+              mt: 0.3,
+            }}
+          >
+            <Typography
+              variant="caption"
+              sx={{
+                color: 'white',
+                fontWeight: 600,
+                fontSize: 10,
+                lineHeight: 1.4,
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {entry.speaker?.name || 'Speaker'}
+            </Typography>
+          </Box>
+          <Box
+            sx={{
+              bgcolor: 'rgba(0,0,0,0.7)',
+              backdropFilter: 'blur(6px)',
+              borderRadius: 1.5,
+              px: 1.5,
+              py: 1,
+              flex: 1,
+            }}
+          >
+            <Typography
+              variant="body2"
+              sx={{
+                color: 'grey.100',
+                fontSize: 13,
+                lineHeight: 1.5,
+              }}
+            >
+              {entry.text}
+            </Typography>
+          </Box>
+        </Box>
+      ))}
     </Box>
   );
 }

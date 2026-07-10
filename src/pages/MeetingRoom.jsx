@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
@@ -10,48 +10,46 @@ import Dialog from '@mui/material/Dialog';
 import DialogTitle from '@mui/material/DialogTitle';
 import DialogContent from '@mui/material/DialogContent';
 import DialogActions from '@mui/material/DialogActions';
-import Chip from '@mui/material/Chip';
 import Alert from '@mui/material/Alert';
 import MicIcon from '@mui/icons-material/Mic';
 import MicOffIcon from '@mui/icons-material/MicOff';
-import VideocamIcon from '@mui/icons-material/Videocam';
-import VideocamOffIcon from '@mui/icons-material/VideocamOff';
-import ScreenShareIcon from '@mui/icons-material/ScreenShare';
-import StopScreenShareIcon from '@mui/icons-material/StopScreenShare';
-import ChatIcon from '@mui/icons-material/Chat';
 import CallEndIcon from '@mui/icons-material/CallEnd';
 import LogoutIcon from '@mui/icons-material/Logout';
+import FiberManualRecordIcon from '@mui/icons-material/FiberManualRecord';
+import StopIcon from '@mui/icons-material/Stop';
+import AccessTimeIcon from '@mui/icons-material/AccessTime';
 import { useAuth } from '../contexts/AuthContext';
 import { useMeeting, useLiveKit } from '../hooks/useMeeting';
 import { useVoice, useLLM } from '../hooks/useVoice';
 import { getLiveKitToken, endMeeting } from '../services/livekit';
-import VideoGrid, { EmptyVideoGrid } from '../components/meeting/VideoGrid';
-import ChatPanel from '../components/meeting/ChatPanel';
+import AudioVisualizer, { EmptyAudioState } from '../components/meeting/VideoGrid';
 import CaptionsOverlay from '../components/meeting/CaptionsOverlay';
 import VoiceControls from '../components/meeting/VoiceControls';
+import AudioParticipantTile from '../components/meeting/VideoTile';
 
 export default function MeetingRoom() {
   const { meetingId } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
-  const { meeting, participants, messages, loading, error, sendMessage } =
+  const { meeting, participants, loading, error } =
     useMeeting(meetingId);
   const { service, isConnected, connect, disconnect } = useLiveKit();
 
   const [connecting, setConnecting] = useState(false);
-  const [showChat, setShowChat] = useState(false);
   const [micOn, setMicOn] = useState(true);
-  const [camOn, setCamOn] = useState(true);
-  const [screenShareOn, setScreenShareOn] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
   const [summaryOpen, setSummaryOpen] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const timerRef = useRef(null);
 
   const {
     captionsEnabled,
-    caption,
+    currentCaption,
     captionsHistory,
     sttError,
     toggleCaptions,
-  } = useVoice();
+    getTranscript,
+  } = useVoice(participants);
 
   const {
     summarize,
@@ -71,6 +69,7 @@ export default function MeetingRoom() {
           meeting.roomName, user.id, user.displayName,
         );
         await connect(token, serverUrl);
+        await service.toggleMic(true);
       } catch (err) {
         console.error('Failed to join meeting:', err);
       } finally {
@@ -79,10 +78,29 @@ export default function MeetingRoom() {
     };
 
     joinMeeting();
-  }, [meeting, user, isConnected, connecting, connect]);
+  }, [meeting, user, isConnected, connecting, connect, service]);
+
+  useEffect(() => {
+    if (isRecording) {
+      timerRef.current = setInterval(() => {
+        setElapsed((prev) => prev + 1);
+      }, 1000);
+    } else {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    return () => clearInterval(timerRef.current);
+  }, [isRecording]);
+
+  const formatTime = (seconds) => {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  };
 
   const handleEndMeeting = async () => {
     try {
+      if (captionsEnabled) toggleCaptions();
       await endMeeting(meetingId);
       disconnect();
       navigate('/dashboard');
@@ -92,6 +110,7 @@ export default function MeetingRoom() {
   };
 
   const handleLeaveMeeting = () => {
+    if (captionsEnabled) toggleCaptions();
     disconnect();
     navigate('/dashboard');
   };
@@ -101,24 +120,22 @@ export default function MeetingRoom() {
     setMicOn(!micOn);
   };
 
-  const toggleCamera = async () => {
-    await service.toggleCamera(!camOn);
-    setCamOn(!camOn);
-  };
-
-  const toggleScreenShare = async () => {
-    await service.toggleScreenShare();
-    setScreenShareOn(!screenShareOn);
+  const toggleRecording = () => {
+    if (isRecording) {
+      setIsRecording(false);
+    } else {
+      setIsRecording(true);
+      if (!captionsEnabled) toggleCaptions();
+    }
   };
 
   const handleSummarize = async () => {
     setSummaryOpen(true);
-    if (!llmResult && messages.length > 0) {
-      const transcript = messages
-        .filter((m) => m.type === 'text')
-        .map((m) => `${m.senderName}: ${m.content}`)
-        .join('\n');
-      await summarize(transcript);
+    if (!llmResult) {
+      const transcript = getTranscript();
+      if (transcript.trim()) {
+        await summarize(transcript);
+      }
     }
   };
 
@@ -146,156 +163,181 @@ export default function MeetingRoom() {
     );
   }
 
-  const controlBtnSx = (isOn) => ({
-    width: { xs: 40, md: 48 },
-    height: { xs: 40, md: 48 },
-    bgcolor: isOn ? 'grey.800' : 'error.main',
-    color: isOn ? 'grey.300' : 'white',
-    '&:hover': {
-      bgcolor: isOn ? 'grey.700' : 'error.dark',
-    },
-  });
-
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', height: '100vh', bgcolor: 'black' }}>
-      <Box sx={{ display: 'flex', flex: 1, overflow: 'hidden', position: 'relative' }}>
-        <Box sx={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column' }}>
-          <Box sx={{ flex: 1, position: 'relative' }}>
-            {connecting ? (
-              <Box sx={{ display: 'flex', height: '100%', alignItems: 'center', justifyContent: 'center' }}>
-                <Box sx={{ textAlign: 'center' }}>
-                  <CircularProgress sx={{ mb: 2 }} />
-                  <Typography color="text.secondary">Connecting to meeting...</Typography>
+    <Box sx={{ display: 'flex', flexDirection: 'column', height: '100vh', bgcolor: 'background.default' }}>
+      <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        {connecting ? (
+          <Box sx={{ display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+            <Box sx={{ textAlign: 'center' }}>
+              <CircularProgress sx={{ mb: 2 }} />
+              <Typography color="text.secondary">Connecting to recording session...</Typography>
+            </Box>
+          </Box>
+        ) : (
+          <>
+            <Box
+              sx={{
+                px: { xs: 2, md: 4 },
+                py: 2,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                borderBottom: '1px solid',
+                borderColor: 'divider',
+              }}
+            >
+              <Box sx={{ minWidth: 0 }}>
+                <Typography variant="h6" noWrap sx={{ fontWeight: 600 }}>
+                  {meeting?.title || 'Recording Session'}
+                </Typography>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 0.5 }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                    <AccessTimeIcon sx={{ fontSize: 14, color: 'text.secondary' }} />
+                    <Typography variant="caption" color="text.secondary">
+                      {formatTime(elapsed)}
+                    </Typography>
+                  </Box>
+                  {isRecording && (
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                      <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: 'error.main', animation: 'pulse 1.5s ease-in-out infinite' }} />
+                      <Typography variant="caption" color="error.main" sx={{ fontWeight: 600 }}>
+                        REC
+                      </Typography>
+                    </Box>
+                  )}
                 </Box>
               </Box>
-            ) : isConnected ? (
-              <VideoGrid />
-            ) : (
-              <EmptyVideoGrid />
-            )}
-            {captionsEnabled && (
-              <CaptionsOverlay
-                caption={caption}
-                history={captionsHistory}
-              />
-            )}
-          </Box>
+            </Box>
 
-          <Box
-            sx={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 1.5,
-              py: 2.5,
-              px: 4,
-              background: 'linear-gradient(transparent, rgba(0,0,0,0.85))',
-            }}
-          >
-            <Tooltip title={micOn ? 'Mute' : 'Unmute'}>
-              <IconButton onClick={toggleMic} sx={controlBtnSx(micOn)}>
-                {micOn ? <MicIcon /> : <MicOffIcon />}
-              </IconButton>
-            </Tooltip>
-            <Tooltip title={camOn ? 'Camera Off' : 'Camera On'}>
-              <IconButton onClick={toggleCamera} sx={controlBtnSx(camOn)}>
-                {camOn ? <VideocamIcon /> : <VideocamOffIcon />}
-              </IconButton>
-            </Tooltip>
-            <Tooltip title={screenShareOn ? 'Stop Sharing' : 'Share Screen'}>
-              <IconButton
-                onClick={toggleScreenShare}
-                sx={{
-                  width: 48,
-                  height: 48,
-                  bgcolor: screenShareOn ? 'primary.main' : 'grey.800',
-                  color: screenShareOn ? 'white' : 'grey.300',
-                  '&:hover': { bgcolor: screenShareOn ? 'primary.dark' : 'grey.700' },
-                }}
-              >
-                {screenShareOn ? <StopScreenShareIcon /> : <ScreenShareIcon />}
-              </IconButton>
-            </Tooltip>
-            <VoiceControls
-              captionsEnabled={captionsEnabled}
-              sttError={sttError}
-              onToggleCaptions={toggleCaptions}
-              llmProcessing={llmProcessing}
-              onSummarize={handleSummarize}
-            />
+            <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', py: 4, px: { xs: 2, md: 4 }, overflow: 'auto' }}>
+              <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', maxWidth: 700, mx: 'auto', width: '100%' }}>
+                {isConnected ? <AudioVisualizer /> : <EmptyAudioState />}
 
-            <Tooltip title={showChat ? 'Hide Chat' : 'Show Chat'}>
-              <IconButton
-                onClick={() => setShowChat(!showChat)}
-                sx={{
-                  width: 48,
-                  height: 48,
-                  bgcolor: showChat ? 'primary.main' : 'grey.800',
-                  color: showChat ? 'white' : 'grey.300',
-                  '&:hover': { bgcolor: showChat ? 'primary.dark' : 'grey.700' },
-                }}
-              >
-                <ChatIcon />
-              </IconButton>
-            </Tooltip>
+                <Box sx={{ mt: 3, mb: 2 }}>
+                  <CaptionsOverlay
+                    currentCaption={currentCaption}
+                    history={captionsHistory}
+                  />
+                </Box>
+              </Box>
+            </Box>
+          </>
+        )}
 
-            {meeting?.hostId === user?.id ? (
-              <Button
-                variant="contained"
-                color="error"
-                startIcon={<CallEndIcon />}
-                onClick={handleEndMeeting}
-                sx={{ borderRadius: 24, px: 3, ml: 1 }}
-              >
-                End Meeting
-              </Button>
-            ) : (
-              <Button
-                variant="contained"
-                startIcon={<LogoutIcon />}
-                onClick={handleLeaveMeeting}
-                sx={{ borderRadius: 24, px: 3, ml: 1, bgcolor: 'grey.700', '&:hover': { bgcolor: 'grey.600' } }}
-              >
-                Leave
-              </Button>
-            )}
-          </Box>
+        <Box
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 1.5,
+            py: 2.5,
+            px: 4,
+            borderTop: '1px solid',
+            borderColor: 'divider',
+            bgcolor: 'rgba(0,0,0,0.3)',
+          }}
+        >
+          <Tooltip title={micOn ? 'Mute' : 'Unmute'}>
+            <IconButton
+              onClick={toggleMic}
+              sx={{
+                width: { xs: 40, md: 48 },
+                height: { xs: 40, md: 48 },
+                bgcolor: micOn ? 'grey.800' : 'error.main',
+                color: micOn ? 'grey.300' : 'white',
+                '&:hover': { bgcolor: micOn ? 'grey.700' : 'error.dark' },
+              }}
+            >
+              {micOn ? <MicIcon /> : <MicOffIcon />}
+            </IconButton>
+          </Tooltip>
+
+          <Tooltip title={isRecording ? 'Stop Recording' : 'Start Recording'}>
+            <IconButton
+              onClick={toggleRecording}
+              sx={{
+                width: 56,
+                height: 56,
+                bgcolor: isRecording ? 'error.main' : 'grey.800',
+                color: 'white',
+                '&:hover': { bgcolor: isRecording ? 'error.dark' : 'grey.700' },
+                border: '3px solid',
+                borderColor: isRecording ? 'error.light' : 'grey.600',
+              }}
+            >
+              {isRecording ? <StopIcon /> : <FiberManualRecordIcon />}
+            </IconButton>
+          </Tooltip>
+
+          <VoiceControls
+            captionsEnabled={captionsEnabled}
+            sttError={sttError}
+            onToggleCaptions={toggleCaptions}
+            llmProcessing={llmProcessing}
+            onSummarize={handleSummarize}
+          />
+
+          {meeting?.hostId === user?.id ? (
+            <Button
+              variant="contained"
+              color="error"
+              startIcon={<CallEndIcon />}
+              onClick={handleEndMeeting}
+              sx={{ borderRadius: 24, px: 3, ml: 1 }}
+            >
+              End
+            </Button>
+          ) : (
+            <Button
+              variant="contained"
+              startIcon={<LogoutIcon />}
+              onClick={handleLeaveMeeting}
+              sx={{ borderRadius: 24, px: 3, ml: 1, bgcolor: 'grey.700', '&:hover': { bgcolor: 'grey.600' } }}
+            >
+              Leave
+            </Button>
+          )}
         </Box>
-
-        {showChat && (
-          <Box
-            sx={{
-              width: { xs: '100%', md: 320 },
-              borderLeft: { md: '1px solid' },
-              borderColor: 'divider',
-              bgcolor: 'rgba(9,9,11,0.8)',
-              display: 'flex',
-              flexDirection: 'column',
-              position: { xs: 'absolute', md: 'static' },
-              inset: 0,
-              zIndex: { xs: 10, md: 'auto' },
-            }}
-          >
-            <ChatPanel messages={messages} onSendMessage={sendMessage} />
-          </Box>
-        )}
-
-        {sttError && (
-          <Alert
-            severity="warning"
-            sx={{
-              position: 'absolute',
-              bottom: 80,
-              left: '50%',
-              transform: 'translateX(-50%)',
-              zIndex: 30,
-              maxWidth: 400,
-            }}
-          >
-            {sttError}
-          </Alert>
-        )}
       </Box>
+
+      <Box
+        sx={{
+          position: 'fixed',
+          right: 16,
+          top: '50%',
+          transform: 'translateY(-50%)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 1,
+          maxHeight: '60vh',
+          overflow: 'auto',
+          zIndex: 10,
+        }}
+      >
+        {participants.map((p) => (
+          <AudioParticipantTile
+            key={p.identity || p.id}
+            participant={p}
+            isLocal={p.isLocal}
+          />
+        ))}
+      </Box>
+
+      {sttError && (
+        <Alert
+          severity="warning"
+          sx={{
+            position: 'fixed',
+            bottom: 80,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 30,
+            maxWidth: 400,
+          }}
+        >
+          {sttError}
+        </Alert>
+      )}
 
       <Dialog open={summaryOpen} onClose={handleCloseSummary} maxWidth="md" fullWidth>
         <DialogTitle>AI Meeting Summary</DialogTitle>
@@ -312,7 +354,7 @@ export default function MeetingRoom() {
             </Typography>
           ) : (
             <Typography color="text.secondary">
-              No messages to summarize yet.
+              No captions to summarize yet.
             </Typography>
           )}
         </DialogContent>
