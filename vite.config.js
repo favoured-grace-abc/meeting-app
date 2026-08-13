@@ -5,4 +5,14 @@ import tailwindcss from "@tailwindcss/vite";
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  resolve: {
+    alias: {
+      "@microsoft/signalr": "@microsoft/signalr/dist/browser/signalr.min.js",
+    },
+  },
+  server: {
+    proxy: {
+      "/api": "http://localhost:3001",
+    },
+  },
 });

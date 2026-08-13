@@ -6,7 +6,6 @@ import { getFirestore } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
 import { v4 as uuidv4 } from 'uuid';
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import express from 'express';
 import { generateJoinToken, createRoom, endRoom } from './livekit.js';
 import { transcribeAudio, generateSummary } from './transcription.js';
 import { config } from './config.js';
@@ -258,11 +257,21 @@ export const processRecording = onDocumentCreated(
 // ============================================================
 // Webhook receiver for LiveKit events
 // ============================================================
-const webhookApp = express();
-webhookApp.use(express.raw({ type: 'application/json' }));
+export const livekitWebhook = onRequest(async (req, res) => {
+  let rawBody = '';
+  try {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+      chunks.push(chunk as Buffer);
+    }
+    rawBody = Buffer.concat(chunks).toString('utf-8');
+  } catch {
+    /* stream already consumed */
+  }
+  if (!rawBody) {
+    rawBody = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+  }
 
-webhookApp.post('/', async (req: express.Request, res: express.Response) => {
-  const rawBody = (req.body as Buffer).toString();
   const signature = req.headers['livekit-webhook-signature'] as string;
 
   if (config.webhook.secret && signature) {
@@ -386,5 +395,3 @@ webhookApp.post('/', async (req: express.Request, res: express.Response) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-
-export const livekitWebhook = onRequest(webhookApp);

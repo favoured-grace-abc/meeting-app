@@ -7,14 +7,26 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-# Environment variables
+# Environment variables (never commit real secrets)
 .env
-.env.local
+.env.*
+!.env.example
 *.env
+!*.env.example
+firebase/.env
+token-server/.env
+voice-server/.env
 
+# Dependencies
 node_modules
+
+# Build output
 dist
 dist-ssr
+build
+*.tsbuildinfo
+
+# Local files
 *.local
 
 # Editor directories and files
@@ -27,3 +39,27 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Runtime data written by the local backend
+server/data
+
+# Firebase
+firebase-debug.log*
+.firebase/
+firebase/.cache/
+
+# Flutter / Dart (mobile app)
+mobile/.dart_tool/
+mobile/.packages
+mobile/build/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/ios/Pods/
+mobile/ios/.symlinks/
+mobile/ios/Flutter/Flutter.framework
+mobile/ios/Flutter/Flutter.podspec
+mobile/android/.gradle/
+mobile/android/local.properties
+mobile/android/key.properties
+mobile/*.iml
+mobile/.idea/
