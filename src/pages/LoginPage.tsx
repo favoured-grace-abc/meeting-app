@@ -52,7 +52,7 @@ export default function LoginPage() {
         <CardContent sx={{ p: { xs: 3, md: 5 }, textAlign: "center" }}>
           <Box
             component="img"
-            src="/logo.png"
+            src="/favicon.svg"
             onError={(e: React.SyntheticEvent<HTMLImageElement>) => {
               e.currentTarget.style.display = "none";
             }}

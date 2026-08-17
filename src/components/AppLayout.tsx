@@ -49,7 +49,7 @@ export function BrandLogo() {
   return (
     <Box
       component="img"
-      src="/logo.png"
+      src="/favicon.svg"
       alt="MeetFlow logo"
       onError={() => setBroken(true)}
       sx={{ width: 48, height: 48, borderRadius: 2, objectFit: "contain" }}
