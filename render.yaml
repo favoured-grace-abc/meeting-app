@@ -3,6 +3,7 @@ services:
     name: meetflow-backend
     runtime: node
     plan: free
+    nodeVersion: 22.14.0
     autoDeploy: true
     buildCommand: npm install && npm run build
     startCommand: NODE_ENV=production node server/index.js
