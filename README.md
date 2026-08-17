@@ -2,7 +2,7 @@
 
 MeetFlow is a full-stack meeting recording platform that captures meeting audio in the browser,
 automatically transcribes it with AI, and produces timestamped, speaker-labelled transcripts
-you can search, edit, and export.
+you can edit and export.
 
 Built as a monorepo containing a **React web app**, a **Node/Express backend**, **Firebase
 Cloud Functions**, **LiveKit** real-time tooling, and a **Flutter mobile app**.
@@ -11,15 +11,15 @@ Cloud Functions**, **LiveKit** real-time tooling, and a **Flutter mobile app**.
 
 ## Features
 
-- **Browser-based audio recording** with one-tap start/stop (MediaRecorder, no plugins).
+- **One-tap browser recording** — start/stop with a single button (MediaRecorder, no plugins).
+- **Live captions** as you record using the browser **Web Speech API** (on-device, no external STT keys).
 - **Automatic AI transcription** with timestamped segments and speaker diarization.
-- **Real-time transcript streaming** to the meeting room via **SignalR**, with a polling fallback.
-- **Speaker labelling** — rename speakers in the transcript and the labels persist.
+- **Real-time transcript streaming** to the meeting page via **SignalR**, with a polling fallback.
+- **Speaker labelling** — rename speakers inline in the transcript and the labels persist.
+- **Recording library** — organize recordings into **folders**, rename them, and filter by folder.
 - **Transcript export** in **TXT, SRT, VTT, and DOCX** formats.
-- **Audio playback** of past recordings directly in the meeting room.
-- **Meeting dashboard** with a horizontal calendar, "today" view, upcoming reminders, and global search.
-- **Meeting scheduling** — create, edit, and delete meetings now or schedule them for later.
-- **Dashboard recording preview** — shows the latest three recordings with a "View all" link to the full Recordings page.
+- **Audio playback** of past recordings directly on the transcript page.
+- **Transcription feedback** — flag a recording with a complaint so quality issues can be reviewed.
 - **Firebase authentication** via Google Sign-In.
 - **Dark / light theme** with a settings toggle.
 - **Secure uploads** via short-lived signed URLs (no auth header on the upload — the URL is the credential).
@@ -36,7 +36,7 @@ Cloud Functions**, **LiveKit** real-time tooling, and a **Flutter mobile app**.
 | Backend        | Node.js, Express 4, SignalR (`@microsoft/signalr`), CORS                   |
 | Data           | Local file-based store (`server/data`) or Firebase Firestore + Storage     |
 | Auth           | Firebase Authentication (Google Sign-In)                                   |
-| Realtime       | LiveKit (WebRTC rooms) + SignalR meeting hub                               |
+| Realtime       | SignalR meeting hub (+ LiveKit via Cloud Functions / mobile)               |
 | Transcription  | Groq Whisper (`whisper-large-v3-turbo`), OpenAI Whisper fallback, or mock  |
 | Mobile         | Flutter, Firebase SDKs, LiveKit client, Riverpod/Provider                  |
 | DevOps         | Firebase Hosting, Cloud Functions (Node 20), Firebase Emulators            |
@@ -47,16 +47,16 @@ Cloud Functions**, **LiveKit** real-time tooling, and a **Flutter mobile app**.
 
 ```
 ├── src/                  # React web app
-│   ├── components/       # AppLayout, calendars, dialogs
+│   ├── components/       # AppLayout, VoiceRecorder
 │   ├── context/          # Auth + theme providers
-│   ├── pages/            # Login, Dashboard, Schedule, Meeting Room, Recordings, Settings
+│   ├── pages/            # Login, Dashboard, Meeting, Recordings, Settings
 │   ├── services/         # api.ts, firebase.ts, recorder.ts, signalr.ts
-│   └── utils/            # date & search helpers
+│   └── types.ts          # Shared TypeScript types
 ├── server/               # Express backend (REST API + SignalR hub)
 │   ├── lib/              # auth, store, transcriber, signalr, signedUrl, transcript
 │   └── data/             # local runtime storage (gitignored)
 ├── firebase/             # Firebase project config
-│   └── functions/        # Cloud Functions (LiveKit tokens, meeting lifecycle, webhooks)
+│   └── functions/        # Cloud Functions (LiveKit tokens, transcription, webhooks)
 ├── token-server/         # Standalone LiveKit JWT token server (Spark-plan alternative)
 ├── voice-server/         # Lightweight voice/health server
 ├── mobile/               # Flutter companion app
@@ -134,21 +134,26 @@ Then open **http://localhost:5173** and sign in with Google.
 | `OPENAI_API_KEY`                  | Legacy OpenAI Whisper fallback (used only if Groq is unset)    | Backend        |
 | `FALLBACK_TO_MOCK`                | `"true"` to fall back to mock transcripts if transcription fails | Backend      |
 
-Live captions in the meeting room use the browser **Web Speech API**, so no external
+Live captions in the recorder use the browser **Web Speech API**, so no external
 STT/TTS/LLM keys are required for that path.
 
 ---
 
-## Transcription Pipeline
+## Recording & Transcription Pipeline
 
-1. The meeting room records audio in the browser and uploads it with a signed URL.
-2. The backend stores the blob and moves the meeting through
+1. Tap record in the dashboard — audio is captured in the browser and **live captions**
+   stream below the button (Web Speech API, optional).
+2. On stop, the app creates a meeting, uploads the blob with a **signed URL**, and marks
+   the recording complete.
+3. The backend stores the blob and moves the meeting through
    `Recording → Uploaded → Processing → Ready` (or `Failed`).
-3. Transcription uses **Groq Whisper** (`whisper-large-v3-turbo`) by default;
+4. Transcription uses **Groq Whisper** (`whisper-large-v3-turbo`) by default;
    if `GROQ_API_KEY` is unset, it falls back to **OpenAI Whisper**.
-4. Segments are diarized into 2 speakers and labelled using your participant hints
+5. Segments are diarized into 2 speakers and labelled using your participant hints
    (or "Speaker 1", "Speaker 2").
-5. Transcripts stream live to the room over **SignalR** (`transcriptSegmentReady`),
+6. If live captions were enabled, the on-device captions are saved as the transcript
+   immediately; the server transcription replaces/augments it in the background.
+7. Transcripts stream live to the meeting page over **SignalR** (`transcriptSegmentReady`),
    with a polling fallback.
 
 If neither key is set and `FALLBACK_TO_MOCK=true`, a demo transcript is generated so you can
@@ -234,17 +239,21 @@ All REST endpoints (except signed upload/download) require a Firebase ID token v
 | -------- | -------------------------------------------------------------- | --------------------------------------------- |
 | GET      | `/api/voice/health`                                            | Health check                                  |
 | GET      | `/meetings`                                                    | List the current user's meetings              |
-| POST     | `/meetings`                                                    | Create a meeting (title, hints, scheduledAt)  |
+| POST     | `/meetings`                                                    | Create a meeting (title)                      |
 | GET      | `/meetings/:meetingId`                                         | Get one meeting                               |
-| PATCH    | `/meetings/:meetingId`                                         | Update a meeting (title, hints, scheduledAt)  |
-| DELETE   | `/meetings/:meetingId`                                         | Delete a meeting                              |
 | GET      | `/meetings/:meetingId/status`                                  | Get meeting status                            |
-| POST     | `/meetings/:meetingId/retry?recordingId=`                      | Retry a failed recording                      |
 | GET      | `/meetings/:meetingId/recordings`                              | List recordings for a meeting                 |
 | POST     | `/meetings/:meetingId/recordings/upload-url`                   | Get a signed upload URL                       |
 | POST     | `/meetings/:meetingId/recordings/:recordingId/complete`        | Mark upload done & start processing           |
 | GET      | `/meetings/:meetingId/recordings/:recordingId/audio-url`       | Get a signed download URL                     |
+| PATCH    | `/meetings/:meetingId/recordings/:recordingId`                 | Rename, move to a folder, or complain         |
+| DELETE   | `/meetings/:meetingId/recordings/:recordingId`                 | Delete a recording                            |
+| GET      | `/recordings`                                                  | Bulk-list all recordings (with transcript text) |
+| GET      | `/folders`                                                     | List folders                                  |
+| POST     | `/folders`                                                     | Create a folder                               |
+| DELETE   | `/folders/:folderId`                                           | Delete a folder (keeps its recordings)        |
 | GET      | `/meetings/:meetingId/transcript`                              | Get the transcript                            |
+| PUT      | `/meetings/:meetingId/transcript`                              | Save a transcript (used for live captions)    |
 | GET      | `/meetings/:meetingId/transcript/search?q=`                    | Search transcript segments                    |
 | GET      | `/meetings/:meetingId/export?format=srt\|vtt\|docx\|txt`       | Download a transcript export                  |
 | PATCH    | `/meetings/:meetingId/speakers/:speakerId`                     | Rename a speaker                              |
@@ -309,7 +318,7 @@ All REST endpoints (except signed upload/download) require a Firebase ID token v
 
 - `.env` files are gitignored — never commit real secrets.
 - Change `SIGNED_URL_SECRET` to a strong random value before deploying.
-- All meeting/recording/transcript endpoints enforce ownership (`ownerUid`).
+- All meeting/recording/transcript/folder endpoints enforce ownership (`ownerUid`).
 - Signed upload/download URLs are time-limited and action-bound.
 - Requests are rate-limited per IP.
 - Firebase rules for Firestore and Storage live under `firebase/`.
@@ -318,5 +327,5 @@ All REST endpoints (except signed upload/download) require a Firebase ID token v
 
 ## Project Status
 
-Active development. The web + backend + transcription flow are functional; the Flutter
-app and Cloud Functions are in progress.
+Active development. The web + backend + transcription flow (recorder, live captions, folders,
+transcript editing, and export) are functional; the Flutter app and Cloud Functions are in progress.

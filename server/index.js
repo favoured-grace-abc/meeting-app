@@ -15,11 +15,19 @@ import {
   getMeeting,
   listMeetings,
   updateMeeting,
-  deleteMeeting,
   createRecording,
   getRecording,
   listRecordings,
+  listAllRecordings,
+  updateRecording,
+  deleteRecording,
+  clearFolderFromRecordings,
+  getFolder,
+  listFolders,
+  createFolder,
+  deleteFolder,
   getTranscript,
+  getTranscriptTextsByMeeting,
   saveTranscript,
   getSpeakers,
   setSpeakerLabel,
@@ -110,7 +118,7 @@ function rateLimit(limit, windowMs) {
     next();
   };
 }
-app.use(rateLimit(120, 60000));
+app.use(rateLimit(600, 60000));
 
 // ── Signed upload/download (no auth header — the URL is the credential) ──
 app.put(
@@ -208,6 +216,20 @@ async function requireOwnedMeeting(req, res, { recordingId } = {}) {
   return { meeting };
 }
 
+async function requireOwnedFolder(req, res) {
+  const { folderId } = req.params;
+  const folder = await getFolder(folderId);
+  if (!folder) {
+    problem(res, 404, "Folder not found");
+    return null;
+  }
+  if (folder.ownerUid !== uidOf(req.user)) {
+    problem(res, 403, "You do not have access to this folder");
+    return null;
+  }
+  return folder;
+}
+
 // ── Health ──────────────────────────────────────────
 app.get("/api/voice/health", (_req, res) => {
   res.json({ status: "ok" });
@@ -232,26 +254,9 @@ app.post("/meetings", authenticate, async (req, res, next) => {
         "title",
       ]);
     }
-    const participantHints = Array.isArray(req.body.participantHints)
-      ? req.body.participantHints.filter((h) => typeof h === "string")
-      : null;
-
-    const rawScheduledAt = req.body?.scheduledAt;
-    const scheduledAt =
-      typeof rawScheduledAt === "string" && rawScheduledAt.trim()
-        ? new Date(rawScheduledAt)
-        : null;
-    if (rawScheduledAt && scheduledAt && Number.isNaN(scheduledAt.getTime())) {
-      return problem(res, 400, "Validation failed: scheduledAt is invalid", [
-        "scheduledAt",
-      ]);
-    }
-
     const meeting = await createMeeting({
       ownerUid: uidOf(req.user),
       title,
-      participantHints,
-      scheduledAt: scheduledAt ? scheduledAt.toISOString() : null,
     });
     res.status(201).json(toMeetingDto(meeting));
   } catch (err) {
@@ -283,96 +288,6 @@ app.get("/meetings/:meetingId/status", authenticate, async (req, res, next) => {
     next(err);
   }
 });
-
-app.post("/meetings/:meetingId/retry", authenticate, async (req, res, next) => {
-  try {
-    const recordingId = String(req.query.recordingId || "");
-    if (!recordingId) {
-      return problem(res, 400, "Validation failed: recordingId is required", [
-        "recordingId",
-      ]);
-    }
-    const owned = await requireOwnedMeeting(req, res, { recordingId });
-    if (!owned) return;
-    if (owned.meeting.status !== "Failed") {
-      await updateMeeting(owned.meeting.id, {
-        status: "Processing",
-        failureReason: null,
-        failureMessage: null,
-      });
-    }
-    hub.broadcast(owned.meeting.id, "meetingStatusChanged", {
-      meetingId: owned.meeting.id,
-      status: "Processing",
-    });
-    processRecording(
-      {
-        meetingId: owned.meeting.id,
-        recordingId,
-        durationMs: owned.recording.durationMs || 0,
-      },
-      hub.broadcast.bind(hub),
-    );
-    res.status(202).end();
-  } catch (err) {
-    next(err);
-  }
-});
-
-app.patch("/meetings/:meetingId", authenticate, async (req, res, next) => {
-  try {
-    const owned = await requireOwnedMeeting(req, res);
-    if (!owned) return;
-
-    const patch = {};
-    if (typeof req.body?.title === "string") {
-      const title = req.body.title.trim();
-      if (!title) {
-        return problem(res, 400, "Validation failed: title is required", [
-          "title",
-        ]);
-      }
-      patch.title = title;
-    }
-    if (Array.isArray(req.body.participantHints)) {
-      patch.participantHints = req.body.participantHints.filter(
-        (h) => typeof h === "string",
-      );
-    }
-    const rawScheduledAt = req.body?.scheduledAt;
-    if (typeof rawScheduledAt === "string") {
-      const scheduledAt = rawScheduledAt.trim()
-        ? new Date(rawScheduledAt)
-        : null;
-      if (scheduledAt && Number.isNaN(scheduledAt.getTime())) {
-        return problem(
-          res,
-          400,
-          "Validation failed: scheduledAt is invalid",
-          ["scheduledAt"],
-        );
-      }
-      patch.scheduledAt = scheduledAt ? scheduledAt.toISOString() : null;
-    }
-
-    const meeting = await updateMeeting(owned.meeting.id, patch);
-    res.json(toMeetingDto(meeting));
-  } catch (err) {
-    next(err);
-  }
-});
-
-app.delete("/meetings/:meetingId", authenticate, async (req, res, next) => {
-  try {
-    const owned = await requireOwnedMeeting(req, res);
-    if (!owned) return;
-    await deleteMeeting(owned.meeting.id);
-    res.status(204).end();
-  } catch (err) {
-    next(err);
-  }
-});
-
 
 // ── Recordings ──────────────────────────────────────
 app.get(
@@ -495,6 +410,163 @@ app.get(
   },
 );
 
+app.patch(
+  "/meetings/:meetingId/recordings/:recordingId",
+  authenticate,
+  async (req, res, next) => {
+    try {
+      const owned = await requireOwnedMeeting(req, res, {
+        recordingId: req.params.recordingId,
+      });
+      if (!owned) return;
+
+      const patch = {};
+
+      if (req.body?.title !== undefined) {
+        const title =
+          typeof req.body.title === "string" ? req.body.title.trim() : "";
+        patch.title = title || null;
+      }
+
+      if (req.body?.folderId !== undefined) {
+        const folderId =
+          typeof req.body.folderId === "string" ? req.body.folderId : null;
+        if (folderId) {
+          const folder = await getFolder(folderId);
+          if (!folder || folder.ownerUid !== uidOf(req.user)) {
+            return problem(
+              res,
+              400,
+              "Validation failed: folderId is invalid",
+              ["folderId"],
+            );
+          }
+        }
+        patch.folderId = folderId;
+      }
+
+      if (req.body?.complaint !== undefined) {
+        const complaint = req.body.complaint;
+        if (complaint === null) {
+          patch.complaint = null;
+        } else if (typeof complaint?.message === "string") {
+          const message = complaint.message.trim();
+          if (!message) {
+            return problem(
+              res,
+              400,
+              "Validation failed: complaint.message is required",
+              ["complaint"],
+            );
+          }
+          patch.complaint = {
+            message,
+            createdAt: new Date().toISOString(),
+          };
+        }
+      }
+
+      if (Object.keys(patch).length === 0) {
+        return problem(res, 400, "Nothing to update");
+      }
+
+      const updated = await updateRecording(
+        owned.meeting.id,
+        owned.recording.id,
+        patch,
+      );
+      res.json(updated);
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+app.delete(
+  "/meetings/:meetingId/recordings/:recordingId",
+  authenticate,
+  async (req, res, next) => {
+    try {
+      const owned = await requireOwnedMeeting(req, res, {
+        recordingId: req.params.recordingId,
+      });
+      if (!owned) return;
+      await deleteRecording(owned.meeting.id, owned.recording.id);
+      res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ── All recordings (bulk list) ─────────────────────
+app.get("/recordings", authenticate, async (req, res, next) => {
+  try {
+    const ownerUid = uidOf(req.user);
+    const [recordings, meetings, transcriptsByMeeting] = await Promise.all([
+      listAllRecordings(ownerUid),
+      listMeetings(ownerUid),
+      getTranscriptTextsByMeeting(),
+    ]);
+    const meetingById = new Map(meetings.map((m) => [m.id, m]));
+    const rows = recordings.map((recording) => {
+      const meeting = meetingById.get(recording.meetingId);
+      const transcript = transcriptsByMeeting[recording.meetingId];
+      const transcriptText = transcript?.segments
+        ?.map((seg) => seg.text)
+        .filter(Boolean)
+        .join(" ");
+      return {
+        ...recording,
+        meetingTitle: meeting?.title || null,
+        transcriptText,
+        transcriptReady: Boolean(transcript),
+      };
+    });
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── Folders ────────────────────────────────────────
+app.get("/folders", authenticate, async (req, res, next) => {
+  try {
+    const folders = await listFolders(uidOf(req.user));
+    res.json(folders);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post("/folders", authenticate, async (req, res, next) => {
+  try {
+    const name =
+      typeof req.body?.name === "string" ? req.body.name.trim() : "";
+    if (!name) {
+      return problem(res, 400, "Validation failed: name is required", [
+        "name",
+      ]);
+    }
+    const folder = await createFolder({ ownerUid: uidOf(req.user), name });
+    res.status(201).json(folder);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete("/folders/:folderId", authenticate, async (req, res, next) => {
+  try {
+    const owned = await requireOwnedFolder(req, res);
+    if (!owned) return;
+    await clearFolderFromRecordings(owned.id);
+    await deleteFolder(owned.id);
+    res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ── Transcripts ─────────────────────────────────────
 app.get(
   "/meetings/:meetingId/transcript",
@@ -507,6 +579,39 @@ app.get(
       if (!transcript) {
         return problem(res, 404, "Transcript not ready yet");
       }
+      res.json(transcript);
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+app.put(
+  "/meetings/:meetingId/transcript",
+  authenticate,
+  async (req, res, next) => {
+    try {
+      const owned = await requireOwnedMeeting(req, res);
+      if (!owned) return;
+      const segments = req.body?.segments;
+      if (!Array.isArray(segments)) {
+        return problem(res, 400, "Validation failed: segments required", [
+          "segments",
+        ]);
+      }
+      const transcript = {
+        id: `client-${Date.now()}`,
+        meetingId: owned.meeting.id,
+        createdAt: new Date().toISOString(),
+        segments,
+      };
+      await saveTranscript(transcript);
+      await updateMeeting(owned.meeting.id, { status: "Ready" });
+      hub.broadcast(owned.meeting.id, "meetingStatusChanged", {
+        meetingId: owned.meeting.id,
+        status: "Ready",
+        timestamp: new Date().toISOString(),
+      });
       res.json(transcript);
     } catch (err) {
       next(err);

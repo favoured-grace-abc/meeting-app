@@ -5,8 +5,6 @@ import Typography from "@mui/material/Typography";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
-import Chip from "@mui/material/Chip";
-import CircularProgress from "@mui/material/CircularProgress";
 import Alert from "@mui/material/Alert";
 import IconButton from "@mui/material/IconButton";
 import TextField from "@mui/material/TextField";
@@ -15,57 +13,23 @@ import Stack from "@mui/material/Stack";
 import MenuItem from "@mui/material/MenuItem";
 import Select from "@mui/material/Select";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
-import MicIcon from "@mui/icons-material/Mic";
-import StopCircleIcon from "@mui/icons-material/StopCircle";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import DownloadIcon from "@mui/icons-material/Download";
 import EditIcon from "@mui/icons-material/Edit";
 import CheckIcon from "@mui/icons-material/Check";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import { api, ApiError } from "../services/api";
-import { AudioRecorder } from "../services/recorder";
 import { MeetingHubClient } from "../services/signalr";
-import type {
-  Meeting,
-  Recording,
-  Transcript,
-  TranscriptSegment,
-} from "../types";
+import type { Meeting, Transcript, TranscriptSegment } from "../types";
 import AppLayout from "../components/AppLayout";
 
-type UploadState =
-  | "idle"
-  | "recording"
-  | "uploading"
-  | "processing"
-  | "ready"
-  | "failed";
-
-function formatClock(ms: number) {
-  const totalSeconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-}
+type UploadState = "idle" | "processing" | "ready" | "failed";
 
 function formatTimestamp(ms: number) {
   const totalSeconds = Math.floor(ms / 1000);
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-}
-
-function statusChipColor(status: string) {
-  switch (status) {
-    case "Ready":
-      return "success" as const;
-    case "Failed":
-      return "error" as const;
-    case "Recording":
-      return "info" as const;
-    default:
-      return "warning" as const;
-  }
 }
 
 function SegmentRow({
@@ -164,14 +128,11 @@ export default function MeetingRoomPage() {
   const navigate = useNavigate();
 
   const [meeting, setMeeting] = useState<Meeting | null>(null);
-  const [recordings, setRecordings] = useState<Recording[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const recorderRef = useRef<AudioRecorder | null>(null);
   const hubRef = useRef<MeetingHubClient | null>(null);
 
   const [uploadState, setUploadState] = useState<UploadState>("idle");
-  const [elapsedMs, setElapsedMs] = useState(0);
   const [activeRecordingId, setActiveRecordingId] = useState<string | null>(
     null,
   );
@@ -193,25 +154,29 @@ export default function MeetingRoomPage() {
   }, [meetingId]);
 
   const loadMeeting = useCallback(async () => {
-    const [meet, recs, status] = await Promise.all([
+    const [meet, recs, status, transcript] = await Promise.all([
       api.getMeeting(meetingId),
       api.listRecordings(meetingId).catch(() => []),
       api.getMeetingStatus(meetingId),
+      api.getTranscript(meetingId).catch(() => null),
     ]);
-    return { meet, recs, status };
+    return { meet, recs, status, transcript };
   }, [meetingId]);
 
   useEffect(() => {
     let cancelled = false;
     loadMeeting()
-      .then(async ({ meet, recs, status }) => {
+      .then(({ meet, recs, status, transcript }) => {
         if (cancelled) return;
         setMeeting(meet);
-        setRecordings(recs);
         setMeetingStatus(status.status);
         if (recs.length > 0) setActiveRecordingId(recs[0].id);
-        if (status.status === "Ready") {
-          await refreshTranscript();
+        if (transcript) {
+          setTranscript(transcript);
+          setUploadState("ready");
+          setMeetingStatus("Ready");
+        } else if (status.status === "Ready") {
+          void refreshTranscript();
         } else if (
           status.status === "Uploaded" ||
           status.status === "Processing"
@@ -308,73 +273,6 @@ export default function MeetingRoomPage() {
     }
   }, [uploadState, activeRecordingId, audioUrl, meetingId]);
 
-  // Timer while recording.
-  useEffect(() => {
-    if (uploadState !== "recording") return;
-    const startedAt = Date.now() - elapsedMs;
-    const interval = setInterval(
-      () => setElapsedMs(Date.now() - startedAt),
-      250,
-    );
-    return () => clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uploadState]);
-
-  useEffect(() => {
-    return () => {
-      recorderRef.current?.dispose();
-    };
-  }, []);
-
-  const handleToggleRecording = async () => {
-    setUploadError(null);
-    if (uploadState === "recording") {
-      const recorder = recorderRef.current;
-      if (!recorder) return;
-      try {
-        const { blob, contentType, durationMs } = await recorder.stop();
-        recorderRef.current = null;
-        setElapsedMs(0);
-        setUploadState("uploading");
-
-        const fileExtension =
-          contentType.split("/")[1]?.split(";")[0]?.trim() || "webm";
-
-        const { recordingId, uploadUrl } = await api.requestUploadUrl(
-          meetingId,
-          contentType,
-          fileExtension,
-        );
-        setActiveRecordingId(recordingId);
-        await api.uploadBlob(uploadUrl, blob);
-        await api.completeRecording(meetingId, recordingId, durationMs);
-        setUploadState("processing");
-        setMeetingStatus("Processing");
-      } catch (err) {
-        console.error("Recording upload failed:", err);
-        setUploadError(
-          err instanceof Error ? err.message : "Failed to upload recording",
-        );
-        setUploadState("failed");
-      }
-      return;
-    }
-
-    const recorder = new AudioRecorder();
-    recorderRef.current = recorder;
-    try {
-      await recorder.start();
-      setElapsedMs(0);
-      setUploadState("recording");
-      setMeetingStatus("Recording");
-    } catch (err) {
-      setUploadError(
-        err instanceof Error ? err.message : "Could not start microphone",
-      );
-      recorderRef.current = null;
-    }
-  };
-
   const handleExport = async (format: "srt" | "vtt" | "txt") => {
     const base =
       meeting?.title?.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "meeting";
@@ -406,9 +304,6 @@ export default function MeetingRoomPage() {
     );
   }
 
-  const isRecording = uploadState === "recording";
-  const isBusy = uploadState === "uploading" || uploadState === "processing";
-
   return (
     <AppLayout>
       <Button
@@ -420,85 +315,17 @@ export default function MeetingRoomPage() {
       </Button>
 
       <Stack spacing={3}>
-        <Card
-          sx={{
-            p: { xs: 2, md: 3 },
-            borderRadius: 3,
-            background:
-              "linear-gradient(135deg, rgba(35,29,140,0.10), rgba(6,182,212,0.08))",
-          }}
-        >
-          <Box
-            sx={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              flexWrap: "wrap",
-              gap: 2,
-            }}
-          >
-            <Box>
-              <Typography
-                variant="h5"
-                sx={{ fontWeight: 800, letterSpacing: "-0.02em" }}
-              >
-                {meeting?.title || "Meeting"}
-              </Typography>
-              <Box
-                sx={{ display: "flex", alignItems: "center", gap: 1, mt: 1 }}
-              >
-                <Chip
-                  size="small"
-                  label={isBusy ? "Processing…" : meetingStatus}
-                  color={statusChipColor(meetingStatus)}
-                />
-                {isRecording && (
-                  <Chip size="small" color="error" label="● REC" />
-                )}
-              </Box>
-            </Box>
+        {uploadError && (
+          <Alert severity="error" onClose={() => setUploadError(null)}>
+            {uploadError}
+          </Alert>
+        )}
 
-            <Button
-              variant={isRecording ? "contained" : "contained"}
-              color={isRecording ? "error" : "primary"}
-              size="large"
-              disabled={isBusy}
-              startIcon={
-                isBusy ? (
-                  <CircularProgress size={20} color="inherit" />
-                ) : isRecording ? (
-                  <StopCircleIcon />
-                ) : (
-                  <MicIcon />
-                )
-              }
-              onClick={handleToggleRecording}
-              sx={{ borderRadius: 12, px: 4 }}
-            >
-              {isBusy
-                ? "Processing…"
-                : isRecording
-                  ? `Stop & Save (${formatClock(elapsedMs)})`
-                  : "Record"}
-            </Button>
-          </Box>
-
-          {uploadError && (
-            <Alert
-              severity="error"
-              onClose={() => setUploadError(null)}
-              sx={{ mt: 2 }}
-            >
-              {uploadError}
-            </Alert>
-          )}
-
-          {meetingStatus === "Failed" && (
-            <Alert severity="error" sx={{ mt: 2 }}>
-              This meeting failed to process. Try recording again.
-            </Alert>
-          )}
-        </Card>
+        {meetingStatus === "Failed" && (
+          <Alert severity="error">
+            This meeting failed to process. Try recording again.
+          </Alert>
+        )}
 
         {uploadState === "ready" && transcript && (
           <>
@@ -565,44 +392,6 @@ export default function MeetingRoomPage() {
               </Card>
             )}
           </>
-        )}
-
-        {!isRecording && !isBusy && recordings.length > 0 && (
-          <Box>
-            <Typography
-              variant="subtitle2"
-              color="text.secondary"
-              sx={{ mb: 1 }}
-            >
-              Past recordings ({recordings.length})
-            </Typography>
-            <Stack spacing={1}>
-              {recordings.map((recording) => (
-                <Card key={recording.id} variant="outlined">
-                  <CardContent
-                    sx={{
-                      py: 1.5,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "space-between",
-                    }}
-                  >
-                    <Typography variant="body2">
-                      {recording.fileExtension.toUpperCase()} ·{" "}
-                      {formatClock(recording.durationMs)}
-                    </Typography>
-                    <Chip
-                      size="small"
-                      label={recording.status}
-                      color={
-                        recording.status === "Ready" ? "success" : "default"
-                      }
-                    />
-                  </CardContent>
-                </Card>
-              ))}
-            </Stack>
-          </Box>
         )}
       </Stack>
 

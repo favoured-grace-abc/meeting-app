@@ -19,7 +19,23 @@ export interface Recording {
   storageKey: string;
   durationMs: number;
   status: string;
+  title?: string | null;
+  folderId?: string | null;
+  complaint?: RecordingComplaint | null;
   createdAt: string;
+}
+
+export interface RecordingComplaint {
+  message: string;
+  createdAt: string;
+}
+
+export interface Folder {
+  id: string;
+  ownerUid: string;
+  name: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface TranscriptSegment {

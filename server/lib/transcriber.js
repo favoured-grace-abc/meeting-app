@@ -3,6 +3,7 @@ import {
   updateMeeting,
   updateRecording,
   readBlob,
+  getTranscript,
   saveTranscript,
 } from "./store.js";
 import { isValidAudioType } from "./audio.js";
@@ -52,20 +53,29 @@ function speakerLabelFor(meeting, speakerId) {
   return `Speaker ${index + 1}`;
 }
 
+// Split a plain segment list into speakers. OpenAI's diarize model gives real
+// speaker turns; when only a plain transcript exists, this heuristic splits on
+// silence gaps (>1.5s) and cycles through up to 4 speakers.
 function diarize(whisperSegments, meeting) {
   const speakers = new Map();
   let currentSpeakerIndex = 0;
   const segments = whisperSegments.map((seg, i) => {
     const prev = whisperSegments[i - 1];
-    const startsNewTurn = !prev || seg.start - prev.end > 1.2;
-    if (startsNewTurn) currentSpeakerIndex = (currentSpeakerIndex + 1) % 2;
+    const gap = prev ? seg.start - prev.end : 0;
+    const startsNewTurn =
+      !prev || gap > 1.5 || (seg.text && prev.text && seg.text.endsWith("?") && gap > 0.8);
+    if (startsNewTurn) currentSpeakerIndex = (currentSpeakerIndex + 1) % 4;
     const speakerId = `spk_${currentSpeakerIndex}`;
     if (!speakers.has(speakerId))
       speakers.set(speakerId, speakerLabelFor(meeting, speakerId));
+    const speakerLabel =
+      seg.speakerLabel && /^speaker \d+$/i.test(seg.speakerLabel)
+        ? seg.speakerLabel
+        : speakers.get(speakerId);
     return {
       id: `seg_${Date.now().toString(36)}${i}`,
       speakerId,
-      speakerLabel: speakers.get(speakerId),
+      speakerLabel,
       text: seg.text,
       startMs: Math.round(seg.start * 1000),
       endMs: Math.round(seg.end * 1000),
@@ -103,6 +113,61 @@ async function transcribeWithGroq(buffer, contentType) {
   // Groq sometimes returns only a plain text (no segments); synthesize one.
   if (segments.length === 0 && result.text && result.text.trim()) {
     segments.push({
+      start: 0,
+      end: 0,
+      text: result.text.trim(),
+      confidence: 0.9,
+    });
+  }
+  return segments;
+}
+
+async function transcribeWithOpenAI(buffer, contentType) {
+  const { default: OpenAI } = await import("openai");
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("OPENAI_API_KEY is not set");
+  const client = new OpenAI({ apiKey });
+  const extension = (contentType.split("/")[1] || "webm").split(";")[0];
+  const mimeType = contentType.split(";")[0].trim();
+  const file = new File([new Uint8Array(buffer)], `audio.${extension}`, {
+    type: mimeType,
+  });
+  // gpt-4o-mini-transcribe is the fastest accurate model; when diarization is
+  // needed, gpt-4o-transcribe-diarize returns real speaker turns.
+  const wantsDiarization = process.env.OPENAI_DIARIZE !== "false";
+  const model = wantsDiarization
+    ? "gpt-4o-transcribe-diarize"
+    : "gpt-4o-mini-transcribe";
+  const result = await client.audio.transcriptions.create({
+    file,
+    model,
+    response_format: "verbose_json",
+    timestamp_granularities: ["segment"],
+  });
+
+  // Diarized model returns speaker turns directly.
+  const turns = result.turns || result.segments || [];
+  const segments = turns
+    .filter((t) => t && t.text && String(t.text).trim())
+    .map((seg, i) => {
+      const rawSpeaker = seg.speaker
+        ? String(seg.speaker).trim()
+        : `Speaker ${(i % 2) + 1}`;
+      const numMatch = rawSpeaker.match(/(\d+)/);
+      const index = numMatch ? Number(numMatch[1]) - 1 : i % 2;
+      return {
+        speakerId: `spk_${index}`,
+        speakerLabel: `Speaker ${index + 1}`,
+        start: seg.start ?? 0,
+        end: seg.end ?? 0,
+        text: seg.text,
+        confidence: seg.avg_logprob ? Math.max(0, 1 + seg.avg_logprob) : 0.9,
+      };
+    });
+  if (segments.length === 0 && result.text && result.text.trim()) {
+    segments.push({
+      speakerId: "spk_0",
+      speakerLabel: "Speaker 1",
       start: 0,
       end: 0,
       text: result.text.trim(),
@@ -168,11 +233,12 @@ export async function processRecording(
 
     let segments;
     const fallbackToMock = process.env.FALLBACK_TO_MOCK === "true";
-    const source = process.env.GROQ_API_KEY
-      ? "groq"
-      : process.env.OPENAI_API_KEY
-        ? "openai"
+    const source = process.env.OPENAI_API_KEY
+      ? "openai"
+      : process.env.GROQ_API_KEY && process.env.GROQ_API_KEY !== "your-groq-api-key"
+        ? "groq"
         : null;
+
     if (source) {
       const transcribe =
         source === "groq"
@@ -186,13 +252,10 @@ export async function processRecording(
           throw transcribeErr;
         }
         console.warn(
-          `${source} transcription failed, falling back to mock transcript:`,
+          `${source} transcription failed, using mock fallback:`,
           transcribeErr.message,
         );
-        segments = buildMockTranscript({
-          durationMs: recording.durationMs,
-          participantHints: meeting.participantHints,
-        });
+        segments = [];
       }
     } else {
       if (!fallbackToMock) {
@@ -201,6 +264,26 @@ export async function processRecording(
         );
       }
       console.warn("No transcription source configured; using mock fallback");
+      segments = [];
+    }
+
+    // Prefer live captions saved by the client (VoiceRecorder) over synthetic
+    // mock text when there is no real transcription source. Checked right
+    // before saving to be robust against the client save racing the
+    // background processing pipeline.
+    const savedTranscript = await getTranscript(meetingId);
+    const clientCaptions =
+      savedTranscript?.segments?.length > 0 &&
+      savedTranscript?.id?.startsWith("client-") &&
+      savedTranscript.segments.every((s) =>
+        s.speakerId === "caption" || String(s.speakerId || "").startsWith("spk_"),
+      )
+        ? savedTranscript
+        : null;
+
+    if (clientCaptions && (!source || segments.length === 0)) {
+      segments = clientCaptions.segments;
+    } else if (segments.length === 0) {
       segments = buildMockTranscript({
         durationMs: recording.durationMs,
         participantHints: meeting.participantHints,

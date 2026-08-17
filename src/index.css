@@ -45,3 +45,46 @@ button {
 .scrollbar-none::-webkit-scrollbar {
   display: none;
 }
+
+@keyframes meetflow-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(35, 29, 140, 0.5);
+  }
+  70% {
+    box-shadow: 0 0 0 14px rgba(35, 29, 140, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(35, 29, 140, 0);
+  }
+}
+
+.meetflow-pulse {
+  animation: meetflow-pulse 0.7s ease-out;
+}
+
+@keyframes meetflow-ping {
+  0% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  75%,
+  100% {
+    transform: scale(1.45);
+    opacity: 0;
+  }
+}
+
+@keyframes meetflow-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.meetflow-fade-in {
+  animation: meetflow-fade-in 0.3s ease-out;
+}

@@ -2,6 +2,8 @@ import { auth } from "./firebase";
 import type {
   Meeting,
   Recording,
+  RecordingComplaint,
+  Folder,
   Transcript,
   UploadUrlResponse,
 } from "../types";
@@ -49,15 +51,16 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     headers["Content-Type"] = "application/json";
   }
 
-  const res = await fetch(`${API_BASE_URL}${path}`, { ...options, headers }).catch(
-    () => {
-      throw new ApiError(
-        0,
-        `Cannot reach the backend server at ${API_BASE_URL}. ` +
-          "It may be offline. Start it with `npm run dev:server` and try again.",
-      );
-    },
-  );
+  const res = await fetch(`${API_BASE_URL}${path}`, {
+    ...options,
+    headers,
+  }).catch(() => {
+    throw new ApiError(
+      0,
+      `Cannot reach the backend server at ${API_BASE_URL}. ` +
+        "It may be offline. Start it with `npm run dev:server` and try again.",
+    );
+  });
   if (res.status === 204) return undefined as T;
 
   const text = await res.text();
@@ -88,17 +91,11 @@ export interface MeetingStatusPayload {
 }
 
 export const api = {
-  createMeeting(
-    title: string,
-    participantHints?: string[],
-    scheduledAt?: string | null,
-  ) {
+  createMeeting(title: string) {
     return request<Meeting>("/meetings", {
       method: "POST",
       body: JSON.stringify({
         title,
-        participantHints: participantHints || [],
-        scheduledAt: scheduledAt || null,
       }),
     });
   },
@@ -109,29 +106,6 @@ export const api = {
 
   getMeeting(meetingId: string) {
     return request<Meeting>(`/meetings/${encodeURIComponent(meetingId)}`);
-  },
-
-  updateMeeting(
-    meetingId: string,
-    patch: {
-      title?: string;
-      participantHints?: string[];
-      scheduledAt?: string | null;
-    },
-  ) {
-    return request<Meeting>(
-      `/meetings/${encodeURIComponent(meetingId)}`,
-      {
-        method: "PATCH",
-        body: JSON.stringify(patch),
-      },
-    );
-  },
-
-  deleteMeeting(meetingId: string) {
-    return request<void>(`/meetings/${encodeURIComponent(meetingId)}`, {
-      method: "DELETE",
-    });
   },
 
   getMeetingStatus(meetingId: string) {
@@ -191,6 +165,16 @@ export const api = {
     );
   },
 
+  saveTranscript(meetingId: string, segments: TranscriptSegment[]) {
+    return request<Transcript>(
+      `/meetings/${encodeURIComponent(meetingId)}/transcript`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ segments }),
+      },
+    );
+  },
+
   getAudioUrl(meetingId: string, recordingId: string) {
     return request<{ url: string; expiresAt: string }>(
       `/meetings/${encodeURIComponent(meetingId)}/recordings/${encodeURIComponent(recordingId)}/audio-url`,
@@ -205,6 +189,58 @@ export const api = {
         body: JSON.stringify({ label }),
       },
     );
+  },
+
+  updateRecording(
+    meetingId: string,
+    recordingId: string,
+    patch: {
+      title?: string | null;
+      folderId?: string | null;
+      complaint?: RecordingComplaint | null;
+    },
+  ) {
+    return request<Recording>(
+      `/meetings/${encodeURIComponent(meetingId)}/recordings/${encodeURIComponent(recordingId)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      },
+    );
+  },
+
+  deleteRecording(meetingId: string, recordingId: string) {
+    return request<void>(
+      `/meetings/${encodeURIComponent(meetingId)}/recordings/${encodeURIComponent(recordingId)}`,
+      { method: "DELETE" },
+    );
+  },
+
+  listAllRecordings() {
+    return request<
+      (Recording & {
+        meetingTitle?: string | null;
+        transcriptText?: string;
+        transcriptReady?: boolean;
+      })[]
+    >("/recordings");
+  },
+
+  listFolders() {
+    return request<Folder[]>("/folders");
+  },
+
+  createFolder(name: string) {
+    return request<Folder>("/folders", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+  },
+
+  deleteFolder(folderId: string) {
+    return request<void>(`/folders/${encodeURIComponent(folderId)}`, {
+      method: "DELETE",
+    });
   },
 
   async exportTranscript(

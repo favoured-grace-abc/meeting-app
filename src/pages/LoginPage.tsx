@@ -103,8 +103,11 @@ export default function LoginPage() {
             disabled={busy}
             sx={{ py: 1.5, borderRadius: 12, textTransform: "none" }}
           >
-            {busy ? "Signing in..." : "Continue with Google"}
+            {busy ? "Redirecting to Google..." : "Continue with Google"}
           </Button>
+          <Typography variant="caption" color="text.disabled" sx={{ mt: 2 }}>
+            You will be redirected to Google to sign in.
+          </Typography>
         </CardContent>
       </Card>
     </Box>

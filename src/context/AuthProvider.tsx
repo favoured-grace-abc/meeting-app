@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   auth,
@@ -15,25 +15,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (nextUser) => {
+    let cancelled = false;
+    onAuthStateChanged(auth, (nextUser) => {
+      if (cancelled) return;
       setUser(nextUser);
       setLoading(false);
     });
-    return unsubscribe;
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const signIn = useCallback(async () => {
+    const result = await signInWithPopup(auth, googleProvider);
+    setUser(result.user);
+    return result.user;
   }, []);
 
   const value = useMemo(
     () => ({
       user,
       loading,
-      signIn: async () => {
-        await signInWithPopup(auth, googleProvider);
-      },
+      signIn,
       signOut: async () => {
         await firebaseSignOut(auth);
       },
     }),
-    [user, loading],
+    [user, loading, signIn],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

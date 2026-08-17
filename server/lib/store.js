@@ -10,8 +10,9 @@ const MEETINGS_DIR = path.join(DATA_DIR, 'meetings');
 const RECORDINGS_DIR = path.join(DATA_DIR, 'recordings');
 const SPEAKERS_DIR = path.join(DATA_DIR, 'speakers');
 const TRANSCRIPTS_DIR = path.join(DATA_DIR, 'transcripts');
+const FOLDERS_DIR = path.join(DATA_DIR, 'folders');
 
-for (const dir of [UPLOADS_DIR, MEETINGS_DIR, RECORDINGS_DIR, SPEAKERS_DIR, TRANSCRIPTS_DIR]) {
+for (const dir of [UPLOADS_DIR, MEETINGS_DIR, RECORDINGS_DIR, SPEAKERS_DIR, TRANSCRIPTS_DIR, FOLDERS_DIR]) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
@@ -24,8 +25,27 @@ async function readJson(filePath, fallback = null) {
   }
 }
 
-async function writeJson(filePath, data) {
-  await fs.promises.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
+// Serialize writes per file path so concurrent updates (e.g. status + meeting
+// patch racing) cannot interleave and corrupt the JSON.
+const writeQueues = new Map();
+
+function enqueueWrite(filePath, work) {
+  const prev = writeQueues.get(filePath) || Promise.resolve();
+  const next = prev.then(work, work);
+  writeQueues.set(
+    filePath,
+    next.catch(() => {}),
+  );
+  return next;
+}
+
+function writeJson(filePath, data) {
+  const payload = JSON.stringify(data, null, 2);
+  return enqueueWrite(filePath, async () => {
+    const tmpPath = `${filePath}.${randomUUID()}.tmp`;
+    await fs.promises.writeFile(tmpPath, payload, 'utf8');
+    await fs.promises.rename(tmpPath, filePath);
+  });
 }
 
 function meetingFile(id) {
@@ -79,15 +99,6 @@ export async function updateMeeting(meetingId, patch) {
   return meeting;
 }
 
-export async function deleteMeeting(meetingId) {
-  try {
-    await fs.promises.unlink(meetingFile(meetingId));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 // ── Recordings ──────────────────────────────────────
 export async function getRecording(meetingId, recordingId) {
   return readJson(recordingFile(meetingId, recordingId));
@@ -106,6 +117,19 @@ export async function listRecordings(meetingId) {
   );
 }
 
+export async function listAllRecordings(ownerUid) {
+  const files = await fs.promises.readdir(RECORDINGS_DIR).catch(() => []);
+  const recordings = [];
+  for (const file of files) {
+    if (!file.endsWith('.json')) continue;
+    const recording = await readJson(path.join(RECORDINGS_DIR, file));
+    if (recording && recording.ownerUid === ownerUid) recordings.push(recording);
+  }
+  return recordings.sort((a, b) =>
+    String(a.createdAt) < String(b.createdAt) ? 1 : -1,
+  );
+}
+
 export async function createRecording({ meetingId, ownerUid, contentType, fileExtension }) {
   const recording = {
     id: randomUUID(),
@@ -116,6 +140,9 @@ export async function createRecording({ meetingId, ownerUid, contentType, fileEx
     storageKey: `meetings/${meetingId}/${randomUUID()}.${fileExtension}`,
     durationMs: 0,
     status: 'Pending',
+    title: null,
+    folderId: null,
+    complaint: null,
     createdAt: new Date().toISOString(),
   };
   await writeJson(recordingFile(meetingId, recording.id), recording);
@@ -125,9 +152,52 @@ export async function createRecording({ meetingId, ownerUid, contentType, fileEx
 export async function updateRecording(meetingId, recordingId, patch) {
   const recording = await getRecording(meetingId, recordingId);
   if (!recording) return null;
-  Object.assign(recording, patch);
+  Object.assign(recording, patch, { updatedAt: new Date().toISOString() });
   await writeJson(recordingFile(meetingId, recordingId), recording);
   return recording;
+}
+
+export async function deleteRecording(meetingId, recordingId) {
+  const recording = await getRecording(meetingId, recordingId);
+  if (!recording) return false;
+  try {
+    await fs.promises.unlink(recordingFile(meetingId, recordingId));
+  } catch {
+    /* ignore */
+  }
+  if (recording.storageKey) {
+    try {
+      await fs.promises.rm(blobPath(recording.storageKey), { force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+  return true;
+}
+
+export async function deleteAllRecordings(ownerUid) {
+  const files = await fs.promises.readdir(RECORDINGS_DIR).catch(() => []);
+  let deleted = 0;
+  for (const file of files) {
+    if (!file.endsWith('.json')) continue;
+    const recording = await readJson(path.join(RECORDINGS_DIR, file));
+    if (!recording || recording.ownerUid !== ownerUid) continue;
+    if (await deleteRecording(recording.meetingId, recording.id)) deleted++;
+  }
+  return deleted;
+}
+
+export async function clearFolderFromRecordings(folderId) {
+  const files = await fs.promises.readdir(RECORDINGS_DIR).catch(() => []);
+  for (const file of files) {
+    if (!file.endsWith('.json')) continue;
+    const filePath = path.join(RECORDINGS_DIR, file);
+    const recording = await readJson(filePath);
+    if (recording && recording.folderId === folderId) {
+      recording.folderId = null;
+      await writeJson(filePath, recording);
+    }
+  }
 }
 
 // ── Blobs ───────────────────────────────────────────
@@ -165,6 +235,18 @@ export async function getTranscript(meetingId) {
   return readJson(transcriptFile(meetingId));
 }
 
+export async function getTranscriptTextsByMeeting() {
+  const files = await fs.promises.readdir(TRANSCRIPTS_DIR).catch(() => []);
+  const byMeeting = {};
+  for (const file of files) {
+    if (!file.endsWith('.json')) continue;
+    const transcript = await readJson(path.join(TRANSCRIPTS_DIR, file));
+    if (!transcript?.meetingId) continue;
+    byMeeting[transcript.meetingId] = transcript;
+  }
+  return byMeeting;
+}
+
 export async function saveTranscript(t) {
   await writeJson(transcriptFile(t.meetingId), t);
 }
@@ -181,4 +263,52 @@ export async function setSpeakerLabel(meetingId, speakerId, label) {
   speakers[speakerId] = { id: speakerId, label };
   await writeJson(speakersFile(meetingId), speakers);
   return speakers[speakerId];
+}
+
+// ── Folders ────────────────────────────────────────
+const folderFile = (folderId) => path.join(FOLDERS_DIR, `${folderId}.json`);
+
+export async function getFolder(folderId) {
+  return readJson(folderFile(folderId));
+}
+
+export async function listFolders(ownerUid) {
+  const files = await fs.promises.readdir(FOLDERS_DIR).catch(() => []);
+  const folders = [];
+  for (const file of files) {
+    if (!file.endsWith('.json')) continue;
+    const folder = await readJson(path.join(FOLDERS_DIR, file));
+    if (folder && folder.ownerUid === ownerUid) folders.push(folder);
+  }
+  return folders.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+}
+
+export async function createFolder({ ownerUid, name }) {
+  const folder = {
+    id: randomUUID(),
+    ownerUid,
+    name,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  await writeJson(folderFile(folder.id), folder);
+  return folder;
+}
+
+export async function renameFolder(folderId, name) {
+  const folder = await getFolder(folderId);
+  if (!folder) return null;
+  folder.name = name;
+  folder.updatedAt = new Date().toISOString();
+  await writeJson(folderFile(folderId), folder);
+  return folder;
+}
+
+export async function deleteFolder(folderId) {
+  try {
+    await fs.promises.unlink(folderFile(folderId));
+    return true;
+  } catch {
+    return false;
+  }
 }
