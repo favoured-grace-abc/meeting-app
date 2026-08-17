@@ -9,7 +9,7 @@ import type {
 } from "../types";
 
 export const API_BASE_URL = (
-  import.meta.env.VITE_API_BASE_URL || "http://localhost:3001"
+  import.meta.env.VITE_API_BASE_URL || ""
 ).replace(/\/$/, "");
 
 export class ApiError extends Error {
@@ -57,7 +57,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }).catch(() => {
     throw new ApiError(
       0,
-      `Cannot reach the backend server at ${API_BASE_URL}. ` +
+      `Cannot reach the backend server at ${API_BASE_URL || window.location.origin}. ` +
         "It may be offline. Start it with `npm run dev:server` and try again.",
     );
   });
