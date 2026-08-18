@@ -97,10 +97,9 @@ transcript; nothing the client hears locally is ever persisted as one.
 
 1. **Record.** Audio is captured in the browser; a live caption preview streams below the
    button (Web Speech API, optional, on-device only).
-2. **Upload.** On stop the app calls `POST /meetings`, then
-   `POST /meetings/{id}/recordings/upload-url` for a short-lived signed URL, `PUT`s the blob
-   directly to storage, and calls `…/complete` to hand off.
-3. **Process.** `complete` starts the backend pipeline, which moves the meeting through
+2. **Upload.** On stop the app calls `POST /meetings`, then `POST /meetings/{id}/recordings`
+   with the audio as the request body. The API writes it to storage itself.
+3. **Process.** That same call starts the backend pipeline, which moves the meeting through
    `Recording → Uploaded → Processing → Ready` (or `Failed` with a `failureReason`).
 4. **Return.** Segments arrive over SignalR (`transcriptSegmentReady` / `meetingStatusChanged`)
    with a 2.5s status poll as fallback. The meeting page shows the current stage until the
@@ -129,8 +128,7 @@ Quirks of the API that `src/services/api.ts` normalizes so the rest of the app n
 | GET    | `/meetings/{id}`                                         |
 | GET    | `/meetings/{id}/status`                                  |
 | POST   | `/meetings/{id}/retry?recordingId=`                      |
-| POST   | `/meetings/{id}/recordings/upload-url`                   |
-| POST   | `/meetings/{id}/recordings/{recordingId}/complete`       |
+| POST   | `/meetings/{id}/recordings?durationMs=&fileExtension=` (audio as body) |
 | GET    | `/meetings/{id}/recordings/{recordingId}/audio-url`      |
 | GET    | `/meetings/{id}/transcript`                              |
 | GET    | `/meetings/{id}/transcript/search?q=`                    |
@@ -185,17 +183,20 @@ origin, so a new deployment host needs no CORS setup.
 
 ## Project Status
 
-Active development. Backend-side items that still block a full end-to-end run against the
-deployed service:
+Active development. Record → upload works against the deployed service. Remaining backend-side
+gaps before a transcript comes back:
 
-1. `POST /meetings/{id}/recordings/upload-url` returns **500**. The Cloud Run service account
-   lacks `iam.serviceAccounts.signBlob`, so V4 signed-URL minting is denied and no upload can
-   start.
-2. `MeetingRecorder.Workers` is not deployed, so nothing consumes `RecordingUploaded` and a
+1. `MeetingRecorder.Workers` is not deployed, so nothing consumes `RecordingUploaded` and a
    meeting never leaves `Processing`.
-3. `MergeTranscriptAndDiarization` returns early unless both `TranscriptionReady` and
+2. `MergeTranscriptAndDiarization` returns early unless both `TranscriptionReady` and
    `DiarizationReady` are set, so a meeting cannot reach `Ready` while diarization is off.
-4. The deployment has **no authentication middleware**: requests with no token are served as
+3. The deployment has **no authentication middleware**: requests with no token are served as
    `ownerId: "dev-user"`, so anyone can read or write any meeting. The client already sends a
    Firebase bearer token; the API needs to verify it. This matters more now that the API
    accepts any origin.
+4. Audio is stored in `musterus-api.appspot.com`, which grants `allUsers` read. Recordings are
+   downloadable by object path without a credential.
+
+Uploads are capped at 32 MiB by Cloud Run's HTTP/1 request limit — roughly 3 hours of Opus
+audio, but a hard ceiling. Longer recordings would need chunking or the signed-URL path (which
+in turn needs a CORS policy on the bucket).

@@ -197,16 +197,16 @@ export default function VoiceRecorder({ onSaved }: { onSaved?: () => void }) {
       const fileExtension =
         contentType.split("/")[1]?.split(";")[0]?.trim() || "webm";
 
-      const { recordingId, uploadUrl } = await api.requestUploadUrl(
+      // The audio goes through the API rather than straight to storage, and the
+      // same call starts the server pipeline (Uploaded -> Processing -> Ready).
+      // The meeting page picks the transcript up from there — on-device captions
+      // are a live preview only and are never saved as the transcript.
+      const { recordingId } = await api.uploadRecording(
         meeting.id,
-        contentType,
+        blob,
+        durationMs,
         fileExtension,
       );
-      await api.uploadBlob(uploadUrl, blob);
-      // `complete` kicks off the server pipeline (Uploaded -> Processing ->
-      // Ready). The meeting page picks the transcript up from there — on-device
-      // captions are a live preview only and are never saved as the transcript.
-      await api.completeRecording(meeting.id, recordingId, durationMs);
 
       // The API has no list endpoint, so remember the ids locally or this
       // meeting becomes unreachable once we navigate away. See services/library.

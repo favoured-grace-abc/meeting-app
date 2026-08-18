@@ -11,7 +11,7 @@ import {
   type Speaker,
   type Transcript,
   type TranscriptSegment,
-  type UploadUrlResponse,
+  type UploadRecordingResponse,
 } from "../types";
 
 export type { MeetingStatusPayload };
@@ -206,44 +206,30 @@ export const api = {
   },
 
   // ── Recordings ────────────────────────────────────
-  requestUploadUrl(
+  /**
+   * Uploads the audio through the API in one call: the bytes are the request body and the
+   * API writes them to storage, then starts processing.
+   *
+   * The alternative the API also offers — mint a signed URL and PUT straight to GCS — only
+   * works from a browser if the bucket itself publishes a CORS policy, which is bucket
+   * configuration rather than something this app can rely on.
+   */
+  async uploadRecording(
     meetingId: string,
-    contentType: string,
+    blob: Blob,
+    durationMs: number,
     fileExtension: string,
   ) {
-    return request<UploadUrlResponse>(
-      `/meetings/${encodeURIComponent(meetingId)}/recordings/upload-url`,
-      {
-        method: "POST",
-        body: JSON.stringify({ contentType, fileExtension }),
-      },
-    );
-  },
-
-  /** Direct PUT to the signed storage URL — the URL is the credential, so no auth header. */
-  async uploadBlob(uploadUrl: string, blob: Blob): Promise<void> {
-    const res = await fetch(uploadUrl, {
-      method: "PUT",
-      headers: { "Content-Type": blob.type || "application/octet-stream" },
-      body: blob,
-    }).catch(() => {
-      throw new ApiError(0, "Could not reach storage to upload the recording.");
+    const query = new URLSearchParams({
+      durationMs: String(Math.round(durationMs)),
+      fileExtension,
     });
-    if (!res.ok && res.status !== 204) {
-      throw new ApiError(res.status, `Upload failed (${res.status})`);
-    }
-  },
-
-  completeRecording(
-    meetingId: string,
-    recordingId: string,
-    durationMs: number,
-  ) {
-    return request<void>(
-      `/meetings/${encodeURIComponent(meetingId)}/recordings/${encodeURIComponent(recordingId)}/complete`,
+    return request<UploadRecordingResponse>(
+      `/meetings/${encodeURIComponent(meetingId)}/recordings?${query}`,
       {
         method: "POST",
-        body: JSON.stringify({ durationMs: Math.round(durationMs) }),
+        headers: { "Content-Type": blob.type || "application/octet-stream" },
+        body: blob,
       },
     );
   },

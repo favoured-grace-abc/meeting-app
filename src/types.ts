@@ -59,12 +59,10 @@ export interface Transcript {
   segments: TranscriptSegment[];
 }
 
-/** `GetUploadUrlResponse` */
-export interface UploadUrlResponse {
+/** `UploadRecordingResponse` — returned by POST /meetings/{id}/recordings */
+export interface UploadRecordingResponse {
   recordingId: string;
-  uploadUrl: string;
   storageKey: string;
-  expiresAt: string;
 }
 
 /** `AudioUrlResponse` */
