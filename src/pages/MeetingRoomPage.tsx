@@ -6,6 +6,7 @@ import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import Alert from "@mui/material/Alert";
+import CircularProgress from "@mui/material/CircularProgress";
 import IconButton from "@mui/material/IconButton";
 import TextField from "@mui/material/TextField";
 import Divider from "@mui/material/Divider";
@@ -20,10 +21,18 @@ import CheckIcon from "@mui/icons-material/Check";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import { api, ApiError } from "../services/api";
 import { MeetingHubClient } from "../services/signalr";
-import type { Meeting, Transcript, TranscriptSegment } from "../types";
+import { getEntry, updateEntry } from "../services/library";
+import type { ExportFormat, Meeting, Transcript, TranscriptSegment } from "../types";
 import AppLayout from "../components/AppLayout";
 
 type UploadState = "idle" | "processing" | "ready" | "failed";
+
+// The pipeline the backend walks a recording through after `complete`.
+const PIPELINE_COPY: Record<string, string> = {
+  Recording: "Waiting for the recording to finish uploading…",
+  Uploaded: "Audio received — queued for transcription.",
+  Processing: "Transcribing your audio. This usually takes a few seconds.",
+};
 
 function formatTimestamp(ms: number) {
   const totalSeconds = Math.floor(ms / 1000);
@@ -35,28 +44,28 @@ function formatTimestamp(ms: number) {
 function SegmentRow({
   segment,
   meetingId,
-  onSegment,
+  showSpeaker,
+  onSpeakerRenamed,
 }: {
   segment: TranscriptSegment;
   meetingId: string;
-  onSegment: (updated: TranscriptSegment) => void;
+  showSpeaker: boolean;
+  onSpeakerRenamed: (speakerId: string, label: string) => void;
 }) {
+  // Speaker fields are nullable server-side; fall back to a neutral label and
+  // disable renaming when there is no speaker id to rename.
+  const displayLabel = segment.speakerLabel ?? "Speaker";
   const [editing, setEditing] = useState(false);
-  const [label, setLabel] = useState(segment.speakerLabel);
+  const [label, setLabel] = useState(displayLabel);
   const [saving, setSaving] = useState(false);
 
   const save = async () => {
+    if (!segment.speakerId) return;
+    const next = label.trim() || displayLabel;
     setSaving(true);
     try {
-      await api.renameSpeaker(
-        meetingId,
-        segment.speakerId,
-        label.trim() || segment.speakerLabel,
-      );
-      onSegment({
-        ...segment,
-        speakerLabel: label.trim() || segment.speakerLabel,
-      });
+      await api.renameSpeaker(meetingId, segment.speakerId, next);
+      onSpeakerRenamed(segment.speakerId, next);
       setEditing(false);
     } finally {
       setSaving(false);
@@ -78,6 +87,7 @@ function SegmentRow({
         {formatTimestamp(segment.startMs)}
       </Typography>
       <Box sx={{ flex: 1, minWidth: 0 }}>
+        {showSpeaker && (
         <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
           {editing ? (
             <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
@@ -103,19 +113,25 @@ function SegmentRow({
                 variant="body2"
                 sx={{ fontWeight: 700, color: "#231D8C" }}
               >
-                {segment.speakerLabel}
+                {displayLabel}
               </Typography>
-              <IconButton
-                size="small"
-                onClick={() => setEditing(true)}
-                title="Rename speaker"
-              >
-                <EditIcon sx={{ fontSize: 14 }} />
-              </IconButton>
+              {segment.speakerId && (
+                <IconButton
+                  size="small"
+                  onClick={() => setEditing(true)}
+                  title="Rename speaker"
+                >
+                  <EditIcon sx={{ fontSize: 14 }} />
+                </IconButton>
+              )}
             </>
           )}
         </Box>
-        <Typography variant="body2" sx={{ mt: 0.5, color: "text.primary" }}>
+        )}
+        <Typography
+          variant="body2"
+          sx={{ mt: showSpeaker ? 0.5 : 0, color: "text.primary" }}
+        >
           {segment.text}
         </Typography>
       </Box>
@@ -136,7 +152,9 @@ export default function MeetingRoomPage() {
   const [activeRecordingId, setActiveRecordingId] = useState<string | null>(
     null,
   );
-  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [failureMessage, setFailureMessage] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("Txt");
 
   const [meetingStatus, setMeetingStatus] = useState<string>("Recording");
   const [transcript, setTranscript] = useState<Transcript | null>(null);
@@ -154,23 +172,26 @@ export default function MeetingRoomPage() {
   }, [meetingId]);
 
   const loadMeeting = useCallback(async () => {
-    const [meet, recs, status, transcript] = await Promise.all([
+    const [meet, status, transcript] = await Promise.all([
       api.getMeeting(meetingId),
-      api.listRecordings(meetingId).catch(() => []),
       api.getMeetingStatus(meetingId),
       api.getTranscript(meetingId).catch(() => null),
     ]);
-    return { meet, recs, status, transcript };
+    // The API has no recordings-list endpoint, so the recording id comes from
+    // the local library entry written when the recording was uploaded.
+    return { meet, recordingId: getEntry(meetingId)?.recordingId ?? null, status, transcript };
   }, [meetingId]);
 
   useEffect(() => {
     let cancelled = false;
     loadMeeting()
-      .then(({ meet, recs, status, transcript }) => {
+      .then(({ meet, recordingId, status, transcript }) => {
         if (cancelled) return;
         setMeeting(meet);
         setMeetingStatus(status.status);
-        if (recs.length > 0) setActiveRecordingId(recs[0].id);
+        if (recordingId) setActiveRecordingId(recordingId);
+        // Keep the library's copy of the title in step with the server's.
+        updateEntry(meetingId, { title: meet.title });
         if (transcript) {
           setTranscript(transcript);
           setUploadState("ready");
@@ -182,6 +203,9 @@ export default function MeetingRoomPage() {
           status.status === "Processing"
         ) {
           setUploadState("processing");
+        } else if (status.status === "Failed") {
+          setUploadState("failed");
+          setFailureMessage(status.failureMessage ?? null);
         }
       })
       .catch((err) => {
@@ -194,7 +218,7 @@ export default function MeetingRoomPage() {
     return () => {
       cancelled = true;
     };
-  }, [loadMeeting, refreshTranscript]);
+  }, [loadMeeting, refreshTranscript, meetingId]);
 
   // Live updates via SignalR hub + polling fallback.
   useEffect(() => {
@@ -211,7 +235,14 @@ export default function MeetingRoomPage() {
           ) {
             setUploadState("processing");
           }
-          if (payload.status === "Failed") setUploadState("failed");
+          if (payload.status === "Failed") {
+            setUploadState("failed");
+            // Hub events carry no failure detail — fetch it over REST.
+            void api
+              .getMeetingStatus(meetingId)
+              .then((s) => setFailureMessage(s.failureMessage ?? null))
+              .catch(() => undefined);
+          }
         },
         onSegment: (segment) => {
           setTranscript((prev) => {
@@ -255,6 +286,7 @@ export default function MeetingRoomPage() {
           await refreshTranscript();
         } else if (status.status === "Failed") {
           setUploadState("failed");
+          setFailureMessage(status.failureMessage ?? null);
         }
       } catch {
         /* keep polling */
@@ -273,18 +305,43 @@ export default function MeetingRoomPage() {
     }
   }, [uploadState, activeRecordingId, audioUrl, meetingId]);
 
-  const handleExport = async (format: "srt" | "vtt" | "txt") => {
+  const handleExport = async (format: ExportFormat) => {
     const base =
       meeting?.title?.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "meeting";
-    await api.exportTranscript(meetingId, format, `${base}.${format}`);
+    await api.exportTranscript(
+      meetingId,
+      format,
+      `${base}.${format.toLowerCase()}`,
+    );
   };
 
-  const handleSegmentUpdate = (updated: TranscriptSegment) => {
+  const handleRetry = async () => {
+    if (!activeRecordingId) return;
+    setRetrying(true);
+    try {
+      await api.retryMeeting(meetingId, activeRecordingId);
+      setFailureMessage(null);
+      setMeetingStatus("Processing");
+      setUploadState("processing");
+    } catch (err) {
+      setFailureMessage(
+        err instanceof ApiError ? err.message : "Could not retry processing",
+      );
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  // Renaming is per speaker, not per segment — relabel every segment that
+  // belongs to the renamed speaker, the same way the server does.
+  const handleSpeakerRenamed = (speakerId: string, label: string) => {
     setTranscript((prev) => {
       if (!prev) return prev;
       return {
         ...prev,
-        segments: prev.segments.map((s) => (s.id === updated.id ? updated : s)),
+        segments: prev.segments.map((s) =>
+          s.speakerId === speakerId ? { ...s, speakerLabel: label } : s,
+        ),
       };
     });
   };
@@ -315,16 +372,47 @@ export default function MeetingRoomPage() {
       </Button>
 
       <Stack spacing={3}>
-        {uploadError && (
-          <Alert severity="error" onClose={() => setUploadError(null)}>
-            {uploadError}
+        {meetingStatus === "Failed" && (
+          <Alert
+            severity="error"
+            action={
+              activeRecordingId ? (
+                <Button
+                  color="inherit"
+                  size="small"
+                  disabled={retrying}
+                  onClick={handleRetry}
+                >
+                  {retrying ? "Retrying…" : "Retry"}
+                </Button>
+              ) : undefined
+            }
+          >
+            {failureMessage
+              ? `This meeting failed to process: ${failureMessage}`
+              : "This meeting failed to process. Try recording again."}
           </Alert>
         )}
 
-        {meetingStatus === "Failed" && (
-          <Alert severity="error">
-            This meeting failed to process. Try recording again.
-          </Alert>
+        {uploadState !== "ready" && meetingStatus !== "Failed" && (
+          <Card variant="outlined">
+            <CardContent
+              sx={{ display: "flex", alignItems: "center", gap: 2, py: 3 }}
+            >
+              <CircularProgress size={28} />
+              <Box>
+                <Typography variant="body1" sx={{ fontWeight: 700 }}>
+                  {meetingStatus === "Ready"
+                    ? "Finishing up…"
+                    : "Processing recording"}
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  {PIPELINE_COPY[meetingStatus] ??
+                    "Almost there — fetching the transcript."}
+                </Typography>
+              </Box>
+            </CardContent>
+          </Card>
         )}
 
         {uploadState === "ready" && transcript && (
@@ -347,20 +435,20 @@ export default function MeetingRoomPage() {
               <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
                 <Select
                   size="small"
-                  value="txt"
+                  value={exportFormat}
                   onChange={(e) =>
-                    handleExport(e.target.value as "srt" | "vtt" | "txt")
+                    setExportFormat(e.target.value as ExportFormat)
                   }
-                  displayEmpty
                 >
-                  <MenuItem value="txt">TXT</MenuItem>
-                  <MenuItem value="srt">SRT</MenuItem>
-                  <MenuItem value="vtt">VTT</MenuItem>
+                  <MenuItem value="Txt">TXT</MenuItem>
+                  <MenuItem value="Srt">SRT</MenuItem>
+                  <MenuItem value="Vtt">VTT</MenuItem>
+                  <MenuItem value="Docx">DOCX</MenuItem>
                 </Select>
                 <Button
                   size="small"
                   startIcon={<DownloadIcon />}
-                  onClick={() => handleExport("txt")}
+                  onClick={() => handleExport(exportFormat)}
                 >
                   Download
                 </Button>
@@ -369,12 +457,16 @@ export default function MeetingRoomPage() {
 
             <Card variant="outlined">
               <CardContent sx={{ px: { xs: 2, md: 3 }, py: 1 }}>
-                {transcript.segments.map((segment) => (
+                {transcript.segments.map((segment, i) => (
                   <SegmentRow
                     key={segment.id}
                     segment={segment}
                     meetingId={meetingId}
-                    onSegment={handleSegmentUpdate}
+                    showSpeaker={
+                      i === 0 ||
+                      transcript.segments[i - 1].speakerId !== segment.speakerId
+                    }
+                    onSpeakerRenamed={handleSpeakerRenamed}
                   />
                 ))}
               </CardContent>

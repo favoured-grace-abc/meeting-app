@@ -10,7 +10,6 @@ import CircularProgress from "@mui/material/CircularProgress";
 import Alert from "@mui/material/Alert";
 import Button from "@mui/material/Button";
 import IconButton from "@mui/material/IconButton";
-import Tooltip from "@mui/material/Tooltip";
 import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
 import ListItemIcon from "@mui/material/ListItemIcon";
@@ -30,18 +29,30 @@ import FolderIcon from "@mui/icons-material/Folder";
 import MoreVertIcon from "@mui/icons-material/MoreVert";
 import DriveFileRenameOutlineIcon from "@mui/icons-material/DriveFileRenameOutline";
 import MoveToInboxIcon from "@mui/icons-material/MoveToInbox";
-import ReportProblemIcon from "@mui/icons-material/ReportProblem";
 import CreateNewFolderIcon from "@mui/icons-material/CreateNewFolder";
 import DeleteIcon from "@mui/icons-material/Delete";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
-import { api, ApiError } from "../services/api";
-import type { Folder, Recording } from "../types";
+import { api } from "../services/api";
+import {
+  LIBRARY_UPDATED_EVENT,
+  createFolder,
+  deleteFolder as deleteFolderLocal,
+  listEntries,
+  listFolders,
+  removeEntry,
+  updateEntry,
+  type LibraryEntry,
+  type LibraryFolder,
+} from "../services/library";
+import type { MeetingStatus } from "../types";
 import AppLayout from "../components/AppLayout";
 
-interface RecordingRow extends Recording {
-  meetingTitle: string;
+// Rename / folders / removal are device-local: the API exposes no endpoints for
+// them (see services/library). Status and transcript text come from the API.
+interface RecordingRow extends LibraryEntry {
+  status: MeetingStatus | null;
   transcriptText?: string;
-  transcriptReady?: boolean;
+  transcriptReady: boolean;
 }
 
 function formatClock(ms: number) {
@@ -63,7 +74,7 @@ function formatDate(iso: string) {
 export default function RecordingsPage() {
   const navigate = useNavigate();
   const [rows, setRows] = useState<RecordingRow[]>([]);
-  const [folders, setFolders] = useState<Folder[]>([]);
+  const [folders, setFolders] = useState<LibraryFolder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeFolder, setActiveFolder] = useState<string | null>(null);
@@ -86,50 +97,65 @@ export default function RecordingsPage() {
   const [moveFolderId, setMoveFolderId] = useState("none");
   const [moveBusy, setMoveBusy] = useState(false);
 
-  const [complainOpen, setComplainOpen] = useState(false);
-  const [complainRow, setComplainRow] = useState<RecordingRow | null>(null);
-  const [complainText, setComplainText] = useState("");
-  const [complainBusy, setComplainBusy] = useState(false);
-
   const [deleteRow, setDeleteRow] = useState<RecordingRow | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
 
-  const [deleteFolder, setDeleteFolder] = useState<Folder | null>(null);
+  const [deleteFolder, setDeleteFolder] = useState<LibraryFolder | null>(null);
 
+  // The library supplies the list; the API is queried per meeting for status
+  // and transcript text, since it has no bulk endpoint.
   const load = useCallback(async () => {
-    const [bulkRows, folderList] = await Promise.all([
-      api.listAllRecordings().catch(() => [] as RecordingRow[]),
-      api.listFolders().catch(() => [] as Folder[]),
-    ]);
-    const unique = new Map<string, RecordingRow>();
-    bulkRows.forEach((row) => unique.set(row.id, row));
-    const sorted = Array.from(unique.values()).sort((a, b) =>
-      a.createdAt < b.createdAt ? 1 : -1,
+    const entries = listEntries();
+    const rows = await Promise.all(
+      entries.map(async (entry): Promise<RecordingRow> => {
+        const [status, transcript] = await Promise.all([
+          api
+            .getMeetingStatus(entry.meetingId)
+            .then((s) => s.status)
+            .catch(() => null),
+          api.getTranscript(entry.meetingId).catch(() => null),
+        ]);
+        const transcriptText = transcript?.segments
+          .map((s) => s.text)
+          .filter(Boolean)
+          .join(" ");
+        return {
+          ...entry,
+          status,
+          transcriptText: transcriptText || undefined,
+          transcriptReady: Boolean(transcript),
+        };
+      }),
     );
-    return { rows: sorted, folders: folderList };
+    return { rows, folders: listFolders() };
   }, []);
 
   useEffect(() => {
     let cancelled = false;
-    load()
-      .then(({ rows, folders }) => {
-        if (!cancelled) {
-          setRows(rows);
-          setFolders(folders);
-        }
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setError(
-            err instanceof ApiError ? err.message : "Failed to load recordings",
-          );
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+    const run = () => {
+      load()
+        .then(({ rows, folders }) => {
+          if (!cancelled) {
+            setRows(rows);
+            setFolders(folders);
+          }
+        })
+        .catch((err) => {
+          if (!cancelled) {
+            setError(
+              err instanceof Error ? err.message : "Failed to load recordings",
+            );
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+    };
+    run();
+    window.addEventListener(LIBRARY_UPDATED_EVENT, run);
     return () => {
       cancelled = true;
+      window.removeEventListener(LIBRARY_UPDATED_EVENT, run);
     };
   }, [load]);
 
@@ -154,7 +180,7 @@ export default function RecordingsPage() {
     });
   }, [rows, activeFolder]);
 
-  const openMenu = (event: React.MouseEvent, row: RecordingRow) => {
+  const openMenu = (event: React.MouseEvent<HTMLElement>, row: RecordingRow) => {
     setMenuRow(row);
     setMenuAnchor(event.currentTarget);
   };
@@ -176,16 +202,10 @@ export default function RecordingsPage() {
     if (!renameRow) return;
     setRenameBusy(true);
     try {
-      await api.updateRecording(renameRow.meetingId, renameRow.id, {
-        title: renameName.trim(),
-      });
+      updateEntry(renameRow.meetingId, { title: renameName.trim() });
       setRenameOpen(false);
-      showNotice("Recording renamed.");
+      showNotice("Renamed on this device.");
       await refresh();
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to rename recording",
-      );
     } finally {
       setRenameBusy(false);
     }
@@ -194,13 +214,11 @@ export default function RecordingsPage() {
   const handleCreateFolderSave = async () => {
     setCreateBusy(true);
     try {
-      await api.createFolder(createName.trim());
+      createFolder(createName.trim());
       setCreateOpen(false);
       setCreateName("");
       showNotice("Folder created.");
       await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create folder");
     } finally {
       setCreateBusy(false);
     }
@@ -211,7 +229,7 @@ export default function RecordingsPage() {
     setMoveBusy(true);
     try {
       const folderId = moveFolderId === "none" ? null : moveFolderId;
-      await api.updateRecording(moveRow.meetingId, moveRow.id, { folderId });
+      updateEntry(moveRow.meetingId, { folderId });
       setMoveOpen(false);
       showNotice(
         folderId
@@ -219,51 +237,8 @@ export default function RecordingsPage() {
           : "Recording moved out of folder.",
       );
       await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to move recording");
     } finally {
       setMoveBusy(false);
-    }
-  };
-
-  const handleComplainSave = async () => {
-    if (!complainRow) return;
-    setComplainBusy(true);
-    try {
-      await api.updateRecording(complainRow.meetingId, complainRow.id, {
-        complaint: {
-          message: complainText.trim(),
-          createdAt: new Date().toISOString(),
-        },
-      });
-      setComplainOpen(false);
-      showNotice("Thanks — your complaint has been submitted.");
-      await refresh();
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to submit complaint",
-      );
-    } finally {
-      setComplainBusy(false);
-    }
-  };
-
-  const handleComplainClear = async () => {
-    if (!complainRow) return;
-    setComplainBusy(true);
-    try {
-      await api.updateRecording(complainRow.meetingId, complainRow.id, {
-        complaint: null,
-      });
-      setComplainOpen(false);
-      showNotice("Complaint cleared.");
-      await refresh();
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to clear complaint",
-      );
-    } finally {
-      setComplainBusy(false);
     }
   };
 
@@ -271,14 +246,10 @@ export default function RecordingsPage() {
     if (!deleteRow) return;
     setDeleteBusy(true);
     try {
-      await api.deleteRecording(deleteRow.meetingId, deleteRow.id);
+      removeEntry(deleteRow.meetingId);
       setDeleteRow(null);
-      showNotice("Recording deleted.");
+      showNotice("Removed from this device's library.");
       await refresh();
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to delete recording",
-      );
     } finally {
       setDeleteBusy(false);
     }
@@ -288,13 +259,11 @@ export default function RecordingsPage() {
     if (!deleteFolder) return;
     setDeleteBusy(true);
     try {
-      await api.deleteFolder(deleteFolder.id);
+      deleteFolderLocal(deleteFolder.id);
       if (activeFolder === deleteFolder.id) setActiveFolder(null);
       setDeleteFolder(null);
       showNotice("Folder deleted. Its recordings were kept.");
       await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete folder");
     } finally {
       setDeleteBusy(false);
     }
@@ -302,7 +271,7 @@ export default function RecordingsPage() {
 
   const openRename = (row: RecordingRow) => {
     setRenameRow(row);
-    setRenameName(row.title || row.meetingTitle);
+    setRenameName(row.title || "");
     closeMenu();
     setRenameOpen(true);
   };
@@ -312,13 +281,6 @@ export default function RecordingsPage() {
     setMoveFolderId(row.folderId || "none");
     closeMenu();
     setMoveOpen(true);
-  };
-
-  const openComplain = (row: RecordingRow) => {
-    setComplainRow(row);
-    setComplainText(row.complaint?.message || "");
-    closeMenu();
-    setComplainOpen(true);
   };
 
   const openCreate = () => {
@@ -331,10 +293,8 @@ export default function RecordingsPage() {
     closeMenu();
   };
 
-  const titleOf = (row: RecordingRow) => {
-    const t = row.title || row.meetingTitle || "";
-    return t.replace(/^Recording(?=[\s·]|$)/, "Recorded");
-  };
+  const titleOf = (row: RecordingRow) =>
+    (row.title || "").replace(/^Recording(?=[\s·]|$)/, "Recorded");
 
   return (
     <AppLayout>
@@ -440,7 +400,7 @@ export default function RecordingsPage() {
               const folderName = folderNameOf(row.folderId);
               return (
                 <Card
-                  key={row.id}
+                  key={row.meetingId}
                   onClick={() => navigate(`/meeting/${row.meetingId}`)}
                   sx={{ cursor: "pointer", position: "relative" }}
                 >
@@ -462,21 +422,16 @@ export default function RecordingsPage() {
                           >
                             {titleOf(row)}
                           </Typography>
-                          {row.complaint && (
-                            <Tooltip
-                              title={`Reported: ${row.complaint.message}`}
-                            >
-                              <Chip
-                                size="small"
-                                color="error"
-                                variant="outlined"
-                                icon={
-                                  <ReportProblemIcon sx={{ fontSize: 15 }} />
-                                }
-                                label="Reported"
-                                sx={{ height: 22, flexShrink: 0 }}
-                              />
-                            </Tooltip>
+                          {row.status && row.status !== "Ready" && (
+                            <Chip
+                              size="small"
+                              color={
+                                row.status === "Failed" ? "error" : "warning"
+                              }
+                              variant="outlined"
+                              label={row.status}
+                              sx={{ height: 22, flexShrink: 0 }}
+                            />
                           )}
                         </Box>
                         <Typography
@@ -484,7 +439,6 @@ export default function RecordingsPage() {
                           color="text.secondary"
                           noWrap
                         >
-                          {row.fileExtension.toUpperCase()} ·{" "}
                           {formatClock(row.durationMs)} ·{" "}
                           {formatDate(row.createdAt)}
                           {folderName && ` · ${folderName}`}
@@ -580,14 +534,6 @@ export default function RecordingsPage() {
             <ListItemText>Move</ListItemText>
           </MenuItem>
         )}
-        {menuRow && (
-          <MenuItem onClick={() => openComplain(menuRow)}>
-            <ListItemIcon>
-              <ReportProblemIcon fontSize="small" />
-            </ListItemIcon>
-            <ListItemText>Complain about transcription</ListItemText>
-          </MenuItem>
-        )}
         <MenuItem onClick={openCreate}>
           <ListItemIcon>
             <CreateNewFolderIcon fontSize="small" />
@@ -602,7 +548,7 @@ export default function RecordingsPage() {
             <ListItemIcon>
               <DeleteIcon fontSize="small" sx={{ color: "error.main" }} />
             </ListItemIcon>
-            <ListItemText>Delete</ListItemText>
+            <ListItemText>Remove from library</ListItemText>
           </MenuItem>
         )}
       </Menu>
@@ -710,62 +656,17 @@ export default function RecordingsPage() {
       </Dialog>
 
       <Dialog
-        open={complainOpen}
-        onClose={() => setComplainOpen(false)}
-        fullWidth
-        maxWidth="sm"
-      >
-        <DialogTitle sx={{ fontWeight: 800 }}>
-          Complain about transcription
-        </DialogTitle>
-        <DialogContent>
-          <DialogContentText sx={{ mb: 2 }}>
-            Let us know what went wrong with this recording's transcription so
-            we can improve it.
-          </DialogContentText>
-          <TextField
-            autoFocus
-            fullWidth
-            multiline
-            minRows={3}
-            placeholder="e.g. The transcription missed the client's name, and some technical terms are wrong…"
-            value={complainText}
-            onChange={(e) => setComplainText(e.target.value)}
-          />
-        </DialogContent>
-        <DialogActions>
-          {complainRow?.complaint && (
-            <Button
-              onClick={handleComplainClear}
-              disabled={complainBusy}
-              sx={{ mr: "auto" }}
-            >
-              Clear complaint
-            </Button>
-          )}
-          <Button onClick={() => setComplainOpen(false)}>Cancel</Button>
-          <Button
-            variant="contained"
-            color="error"
-            disabled={!complainText.trim() || complainBusy}
-            onClick={handleComplainSave}
-          >
-            {complainBusy ? "Submitting…" : "Submit"}
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      <Dialog
         open={Boolean(deleteRow)}
         onClose={() => setDeleteRow(null)}
         fullWidth
         maxWidth="xs"
       >
-        <DialogTitle sx={{ fontWeight: 800 }}>Delete recording?</DialogTitle>
+        <DialogTitle sx={{ fontWeight: 800 }}>Remove from library?</DialogTitle>
         <DialogContent>
           <DialogContentText>
-            “{deleteRow ? titleOf(deleteRow) : ""}” and its audio will be
-            permanently removed. This cannot be undone.
+            “{deleteRow ? titleOf(deleteRow) : ""}” will disappear from this
+            device's library. The meeting and its audio stay on the server — the
+            API has no delete endpoint — so this only hides it here.
           </DialogContentText>
         </DialogContent>
         <DialogActions>
@@ -776,7 +677,7 @@ export default function RecordingsPage() {
             disabled={deleteBusy}
             onClick={handleDeleteSave}
           >
-            {deleteBusy ? "Deleting…" : "Delete"}
+            {deleteBusy ? "Removing…" : "Remove"}
           </Button>
         </DialogActions>
       </Dialog>

@@ -10,9 +10,4 @@ export default defineConfig({
       "@microsoft/signalr": "@microsoft/signalr/dist/browser/signalr.min.js",
     },
   },
-  server: {
-    proxy: {
-      "/api": "http://localhost:3001",
-    },
-  },
 });

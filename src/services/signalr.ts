@@ -1,7 +1,17 @@
 import * as signalR from '@microsoft/signalr';
 import { auth } from './firebase';
-import { API_BASE_URL } from './api';
+import { API_BASE_URL, normalizeSegment, toMeetingStatus } from './api';
 import type { MeetingStatusPayload, TranscriptSegment } from '../types';
+
+/**
+ * What the hub actually sends. `meetingStatusChanged` carries only the id and a
+ * stringified status — no failure detail, unlike the REST status endpoint — and
+ * `transcriptSegmentReady` carries the domain entity, which has no speakerLabel.
+ */
+interface RawStatusPayload {
+  meetingId: string;
+  status: unknown;
+}
 
 export interface MeetingHubHandlers {
   onStatus?: (payload: MeetingStatusPayload) => void;
@@ -27,11 +37,16 @@ export class MeetingHubClient {
       .withAutomaticReconnect()
       .build();
 
-    connection.on('meetingStatusChanged', (payload: MeetingStatusPayload) => {
-      handlers.onStatus?.(payload);
+    connection.on('meetingStatusChanged', (payload: RawStatusPayload) => {
+      handlers.onStatus?.({
+        meetingId: payload.meetingId,
+        status: toMeetingStatus(payload.status),
+        failureReason: 'None',
+        failureMessage: null,
+      });
     });
-    connection.on('transcriptSegmentReady', (segment: TranscriptSegment) => {
-      handlers.onSegment?.(segment);
+    connection.on('transcriptSegmentReady', (segment: Parameters<typeof normalizeSegment>[0]) => {
+      handlers.onSegment?.(normalizeSegment(segment));
     });
 
     this.connection = connection;
