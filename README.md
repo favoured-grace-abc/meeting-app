@@ -178,19 +178,24 @@ npm run build
 firebase deploy --only hosting
 ```
 
-The app is a static SPA — there is no server to deploy alongside it. The backend must allow
-the deployed origin via CORS.
+The app is a static SPA — there is no server to deploy alongside it. The API allows any
+origin, so a new deployment host needs no CORS setup.
 
 ---
 
 ## Project Status
 
-Active development. Two backend-side items currently block a full end-to-end run against the
+Active development. Backend-side items that still block a full end-to-end run against the
 deployed service:
 
-1. `POST /meetings/{id}/recordings/upload-url` returns **500** — signed-URL minting is not
-   working on that deployment, so uploads cannot start.
-2. The deployment has **no authentication middleware**: requests with no token are served as
-   `ownerId: "dev-user"`, so anyone can read and write any meeting. The client already sends a
-   Firebase bearer token; the API needs to start verifying it.
-3. CORS allows only `http://localhost:5173`, so a deployed frontend cannot call the API yet.
+1. `POST /meetings/{id}/recordings/upload-url` returns **500**. The Cloud Run service account
+   lacks `iam.serviceAccounts.signBlob`, so V4 signed-URL minting is denied and no upload can
+   start.
+2. `MeetingRecorder.Workers` is not deployed, so nothing consumes `RecordingUploaded` and a
+   meeting never leaves `Processing`.
+3. `MergeTranscriptAndDiarization` returns early unless both `TranscriptionReady` and
+   `DiarizationReady` are set, so a meeting cannot reach `Ready` while diarization is off.
+4. The deployment has **no authentication middleware**: requests with no token are served as
+   `ownerId: "dev-user"`, so anyone can read or write any meeting. The client already sends a
+   Firebase bearer token; the API needs to verify it. This matters more now that the API
+   accepts any origin.
