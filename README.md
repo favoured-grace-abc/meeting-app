@@ -11,9 +11,9 @@ comes from the .NET **MeetingRecorder API**:
 https://meeting-recorder-backend-286455810620.europe-west1.run.app
 ```
 
-> **No diarization.** Nothing in the pipeline tries to tell voices apart. A transcript is a
-> single stream of timestamped text; where the API supplies a speaker label it is shown and can
-> be renamed, and where it does not the segments simply read as prose.
+> **Diarization** comes back on the same Deepgram response that carries the text, so speaker
+> labels cost no extra API call. Segments are attributed to "Speaker 1", "Speaker 2", … and the
+> label can be renamed inline; the rename persists and applies to every segment for that voice.
 
 ---
 
@@ -183,20 +183,20 @@ origin, so a new deployment host needs no CORS setup.
 
 ## Project Status
 
-Active development. Record → upload works against the deployed service. Remaining backend-side
-gaps before a transcript comes back:
+Active development. Record → upload → transcribe → return works end to end against the
+deployed service. Transcription runs inline in the upload request — there is no worker host
+and no broker in the request path — so the caller waits for the STT round-trip.
 
-1. `MeetingRecorder.Workers` is not deployed, so nothing consumes `RecordingUploaded` and a
-   meeting never leaves `Processing`.
-2. `MergeTranscriptAndDiarization` returns early unless both `TranscriptionReady` and
-   `DiarizationReady` are set, so a meeting cannot reach `Ready` while diarization is off.
-3. The deployment has **no authentication middleware**: requests with no token are served as
+Known gaps:
+
+1. The deployment has **no authentication middleware**: requests with no token are served as
    `ownerId: "dev-user"`, so anyone can read or write any meeting. The client already sends a
    Firebase bearer token; the API needs to verify it. This matters more now that the API
    accepts any origin.
-4. Audio is stored in `musterus-api.appspot.com`, which grants `allUsers` read. Recordings are
+2. Audio is stored in `musterus-api.appspot.com`, which grants `allUsers` read. Recordings are
    downloadable by object path without a credential.
 
 Uploads are capped at 32 MiB by Cloud Run's HTTP/1 request limit — roughly 3 hours of Opus
-audio, but a hard ceiling. Longer recordings would need chunking or the signed-URL path (which
-in turn needs a CORS policy on the bucket).
+audio, but a hard ceiling. Because transcription is inline, the upload request also has to
+finish inside Cloud Run's 300s request timeout; a long recording will need the work moved back
+off the request path.
