@@ -34,6 +34,16 @@ const PIPELINE_COPY: Record<string, string> = {
   Processing: "Transcribing your audio. This usually takes a few seconds.",
 };
 
+// REST fallback cadence for meeting status, used only while the hub is down.
+// A flat 2.5s tick billed a Cloud Run request every 2.5s for as long as the tab
+// stayed open — ~1,400 an hour on a meeting that had already stopped changing.
+// Back off instead, sleep while the tab is hidden, and stop asking once the budget
+// is spent; the user can ask again by hand.
+const POLL_MIN_MS = 3_000;
+const POLL_MAX_MS = 30_000;
+const POLL_BACKOFF = 1.6;
+const POLL_BUDGET_MS = 10 * 60_000;
+
 function formatTimestamp(ms: number) {
   const totalSeconds = Math.floor(ms / 1000);
   const minutes = Math.floor(totalSeconds / 60);
@@ -156,6 +166,11 @@ export default function MeetingRoomPage() {
   const [retrying, setRetrying] = useState(false);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("Txt");
 
+  // The hub is the primary update channel; polling only covers the window where it
+  // is not connected (the API runs without a SignalR backplane, so a push can land
+  // on an instance this browser is not attached to).
+  const [hubLive, setHubLive] = useState(false);
+  const [pollingExhausted, setPollingExhausted] = useState(false);
   const [meetingStatus, setMeetingStatus] = useState<string>("Recording");
   const [transcript, setTranscript] = useState<Transcript | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
@@ -244,23 +259,25 @@ export default function MeetingRoomPage() {
               .catch(() => undefined);
           }
         },
-        onSegment: (segment) => {
+        onSegments: (segments) => {
+          if (segments.length === 0) return;
           setTranscript((prev) => {
-            if (!prev) {
-              return {
-                id: "",
-                meetingId,
-                createdAt: new Date().toISOString(),
-                segments: [segment],
-              };
-            }
-            if (prev.segments.some((s) => s.id === segment.id)) return prev;
-            return { ...prev, segments: [...prev.segments, segment] };
+            const base = prev ?? {
+              id: "",
+              meetingId,
+              createdAt: new Date().toISOString(),
+              segments: [],
+            };
+            const seen = new Set(base.segments.map((s) => s.id));
+            const added = segments.filter((s) => !seen.has(s.id));
+            if (added.length === 0) return prev;
+            return { ...base, segments: [...base.segments, ...added] };
           });
         },
+        onConnectionChange: setHubLive,
       })
       .catch(() => {
-        /* hub optional; polling fallback covers it */
+        setHubLive(false);
       });
 
     return () => {
@@ -269,31 +286,83 @@ export default function MeetingRoomPage() {
     };
   }, [meetingId, refreshTranscript]);
 
-  // Polling fallback while processing.
-  useEffect(() => {
-    if (
-      uploadState !== "processing" &&
-      meetingStatus !== "Uploaded" &&
-      meetingStatus !== "Processing"
-    ) {
-      return;
+  const checkStatusOnce = useCallback(async () => {
+    const status = await api.getMeetingStatus(meetingId);
+    setMeetingStatus(status.status);
+    if (status.status === "Ready") {
+      await refreshTranscript();
+    } else if (status.status === "Failed") {
+      setUploadState("failed");
+      setFailureMessage(status.failureMessage ?? null);
     }
-    const interval = setInterval(async () => {
+    return status.status;
+  }, [meetingId, refreshTranscript]);
+
+  // Polling fallback while processing. Only runs when the hub is not delivering.
+  useEffect(() => {
+    const processing =
+      uploadState === "processing" ||
+      meetingStatus === "Uploaded" ||
+      meetingStatus === "Processing";
+    if (!processing || hubLive || pollingExhausted) return;
+
+    let cancelled = false;
+    let timer: number | undefined;
+    let delay = POLL_MIN_MS;
+    const startedAt = Date.now();
+
+    const schedule = () => {
+      if (cancelled) return;
+      timer = window.setTimeout(tick, delay);
+      delay = Math.min(Math.round(delay * POLL_BACKOFF), POLL_MAX_MS);
+    };
+
+    const tick = async () => {
+      if (cancelled) return;
+      if (Date.now() - startedAt > POLL_BUDGET_MS) {
+        // Ten minutes of Processing means something is stuck, not slow. Asking on
+        // forever only bills requests, so hand it back to the user rather than
+        // leave an abandoned tab talking to Cloud Run all day.
+        setPollingExhausted(true);
+        return;
+      }
+      // A backgrounded tab has nobody to show the answer to.
+      if (document.hidden) {
+        schedule();
+        return;
+      }
       try {
-        const status = await api.getMeetingStatus(meetingId);
-        setMeetingStatus(status.status);
-        if (status.status === "Ready") {
-          await refreshTranscript();
-        } else if (status.status === "Failed") {
-          setUploadState("failed");
-          setFailureMessage(status.failureMessage ?? null);
-        }
+        const status = await checkStatusOnce();
+        if (cancelled || status === "Ready" || status === "Failed") return;
       } catch {
         /* keep polling */
       }
-    }, 2500);
-    return () => clearInterval(interval);
-  }, [uploadState, meetingStatus, meetingId, refreshTranscript]);
+      schedule();
+    };
+
+    const onVisibilityChange = () => {
+      if (cancelled || document.hidden) return;
+      // Returning to the tab is the one moment a fresh check is worth paying for.
+      window.clearTimeout(timer);
+      delay = POLL_MIN_MS;
+      void tick();
+    };
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    schedule();
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [
+    uploadState,
+    meetingStatus,
+    hubLive,
+    pollingExhausted,
+    checkStatusOnce,
+  ]);
 
   // Load audio playback once transcript is ready.
   useEffect(() => {
@@ -323,6 +392,7 @@ export default function MeetingRoomPage() {
       setFailureMessage(null);
       setMeetingStatus("Processing");
       setUploadState("processing");
+      setPollingExhausted(false);
     } catch (err) {
       setFailureMessage(
         err instanceof ApiError ? err.message : "Could not retry processing",
@@ -330,6 +400,13 @@ export default function MeetingRoomPage() {
     } finally {
       setRetrying(false);
     }
+  };
+
+  // Restarts the fallback poller after it gave up, and answers immediately so a
+  // meeting that finished while nobody was asking shows up on the first click.
+  const handleCheckAgain = () => {
+    setPollingExhausted(false);
+    void checkStatusOnce().catch(() => undefined);
   };
 
   // Renaming is per speaker, not per segment — relabel every segment that
@@ -399,18 +476,27 @@ export default function MeetingRoomPage() {
             <CardContent
               sx={{ display: "flex", alignItems: "center", gap: 2, py: 3 }}
             >
-              <CircularProgress size={28} />
-              <Box>
+              {!pollingExhausted && <CircularProgress size={28} />}
+              <Box sx={{ flexGrow: 1 }}>
                 <Typography variant="body1" sx={{ fontWeight: 700 }}>
-                  {meetingStatus === "Ready"
-                    ? "Finishing up…"
-                    : "Processing recording"}
+                  {pollingExhausted
+                    ? "Still processing"
+                    : meetingStatus === "Ready"
+                      ? "Finishing up…"
+                      : "Processing recording"}
                 </Typography>
                 <Typography variant="body2" color="text.secondary">
-                  {PIPELINE_COPY[meetingStatus] ??
-                    "Almost there — fetching the transcript."}
+                  {pollingExhausted
+                    ? "This is taking longer than usual. We stopped checking automatically — check again when you are ready."
+                    : (PIPELINE_COPY[meetingStatus] ??
+                      "Almost there — fetching the transcript.")}
                 </Typography>
               </Box>
+              {pollingExhausted && (
+                <Button size="small" onClick={handleCheckAgain}>
+                  Check again
+                </Button>
+              )}
             </CardContent>
           </Card>
         )}
