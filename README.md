@@ -1,45 +1,47 @@
 # MeetFlow — Meeting Recording & AI Transcription
 
-MeetFlow is a full-stack meeting recording platform that captures meeting audio in the browser,
-automatically transcribes it with AI, and produces timestamped, speaker-labelled transcripts
-you can edit and export.
+MeetFlow is the web + mobile client for the **Meeting Recorder** service. It captures meeting
+audio in the browser, uploads it to the backend, and shows the timestamped transcript the
+backend produces.
 
-Built as a monorepo containing a **React web app**, a **Node/Express backend**, **Firebase
-Cloud Functions**, **LiveKit** real-time tooling, and a **Flutter mobile app**.
+This repository contains **no server of its own**. All meeting, recording, and transcript data
+comes from the .NET **MeetingRecorder API**:
+
+```
+https://meeting-recorder-backend-286455810620.europe-west1.run.app
+```
+
+> **Diarization** comes back on the same Deepgram response that carries the text, so speaker
+> labels cost no extra API call. Segments are attributed to "Speaker 1", "Speaker 2", … and the
+> label can be renamed inline; the rename persists and applies to every segment for that voice.
 
 ---
 
 ## Features
 
 - **One-tap browser recording** — start/stop with a single button (MediaRecorder, no plugins).
-- **Live captions** as you record using the browser **Web Speech API** (on-device, no external STT keys).
-- **Automatic AI transcription** with timestamped segments and speaker diarization.
-- **Real-time transcript streaming** to the meeting page via **SignalR**, with a polling fallback.
-- **Speaker labelling** — rename speakers inline in the transcript and the labels persist.
-- **Recording library** — organize recordings into **folders**, rename them, and filter by folder.
-- **Transcript export** in **TXT, SRT, VTT, and DOCX** formats.
-- **Audio playback** of past recordings directly on the transcript page.
-- **Transcription feedback** — flag a recording with a complaint so quality issues can be reviewed.
+- **Live caption preview** while recording via the browser **Web Speech API** (on-device, no
+  external STT keys). It is a preview only — never saved as the transcript.
+- **Automatic AI transcription** with timestamped segments, produced by the backend.
+- **Real-time updates** over **SignalR**, with a status-polling fallback.
+- **Retry** a failed meeting from the transcript page.
+- **Transcript export** in TXT, SRT, VTT, and DOCX.
+- **Audio playback** of past recordings via a short-lived signed URL.
+- **Recording library** with folders and renaming (**device-local** — see below).
 - **Firebase authentication** via Google Sign-In.
-- **Dark / light theme** with a settings toggle.
-- **Secure uploads** via short-lived signed URLs (no auth header on the upload — the URL is the credential).
-- **Rate limiting** and per-user access control on every backend endpoint.
-- **Cross-platform Flutter app** (Firebase + LiveKit + local audio recording).
+- **Dark / light theme.**
 
 ---
 
 ## Tech Stack
 
-| Layer          | Technology                                                                 |
-| -------------- | -------------------------------------------------------------------------- |
-| Web frontend   | React 19, TypeScript, Vite 8, Material UI, Tailwind CSS 4                  |
-| Backend        | Node.js, Express 4, SignalR (`@microsoft/signalr`), CORS                   |
-| Data           | Local file-based store (`server/data`) or Firebase Firestore + Storage     |
-| Auth           | Firebase Authentication (Google Sign-In)                                   |
-| Realtime       | SignalR meeting hub (+ LiveKit via Cloud Functions / mobile)               |
-| Transcription  | Groq Whisper (`whisper-large-v3-turbo`), OpenAI Whisper fallback, or mock  |
-| Mobile         | Flutter, Firebase SDKs, LiveKit client, Riverpod/Provider                  |
-| DevOps         | Firebase Hosting, Cloud Functions (Node 20), Firebase Emulators            |
+| Layer         | Technology                                                        |
+| ------------- | ----------------------------------------------------------------- |
+| Web frontend  | React 19, TypeScript, Vite 8, Material UI, Tailwind CSS 4          |
+| Backend       | MeetingRecorder .NET API (separate repository)                     |
+| Auth          | Firebase Authentication (Google Sign-In)                           |
+| Realtime      | SignalR meeting hub (`@microsoft/signalr`)                         |
+| Mobile        | Flutter, Firebase SDKs, LiveKit client                             |
 
 ---
 
@@ -50,282 +52,151 @@ Cloud Functions**, **LiveKit** real-time tooling, and a **Flutter mobile app**.
 │   ├── components/       # AppLayout, VoiceRecorder
 │   ├── context/          # Auth + theme providers
 │   ├── pages/            # Login, Dashboard, Meeting, Recordings, Settings
-│   ├── services/         # api.ts, firebase.ts, recorder.ts, signalr.ts
-│   └── types.ts          # Shared TypeScript types
-├── server/               # Express backend (REST API + SignalR hub)
-│   ├── lib/              # auth, store, transcriber, signalr, signedUrl, transcript
-│   └── data/             # local runtime storage (gitignored)
-├── firebase/             # Firebase project config
-│   └── functions/        # Cloud Functions (LiveKit tokens, transcription, webhooks)
-├── token-server/         # Standalone LiveKit JWT token server (Spark-plan alternative)
+│   ├── services/         # api.ts, firebase.ts, recorder.ts, signalr.ts, library.ts
+│   └── types.ts          # Shapes mirroring the API's DTOs
+├── firebase/             # Firebase project config + Cloud Functions
+├── token-server/         # Standalone LiveKit JWT token server
 ├── voice-server/         # Lightweight voice/health server
 ├── mobile/               # Flutter companion app
-├── dev.mjs               # Runs Vite + backend together
-└── .env.example          # All required environment variables
+└── .env.example          # Required environment variables
 ```
 
 ---
 
 ## Getting Started
 
-### Prerequisites
-
-- **Node.js 20+** (LTS recommended)
-- **npm**
-- A **Firebase** project (free tier is fine; only Cloud Functions need the Blaze plan)
-- A **LiveKit** instance or cloud account
-- A **Groq API key** (free) for real transcription — or an OpenAI key
-
-### 1. Install dependencies
-
 ```bash
 npm install
+cp .env.example .env      # fill in your Firebase credentials
+npm run dev               # http://localhost:5173
 ```
 
-### 2. Configure environment variables
+`VITE_API_BASE_URL` defaults to the deployed API above, so the app works without setting it.
+Point it at `http://localhost:5000` to run against a local `MeetingRecorder.Api`.
 
-```bash
-cp .env.example .env
-```
+### Environment Variables
 
-Edit `.env` and fill in your credentials. See [Environment Variables](#environment-variables)
-for a full reference.
-
-### 3. Run the development servers
-
-MeetFlow is split across two processes in development:
-
-```bash
-# Option A — run both together:
-node dev.mjs
-
-# Option B — run them separately:
-npm run dev           # Vite web app on http://localhost:5173
-npm run dev:server    # Backend API on http://localhost:3001
-```
-
-Then open **http://localhost:5173** and sign in with Google.
-
-> The Vite dev server proxies `/api` to `http://localhost:3001`, and the web SDK
-> uses the functions emulator automatically in dev builds.
-
----
-
-## Environment Variables
-
-| Variable                          | Description                                                    | Used By        |
-| --------------------------------- | -------------------------------------------------------------- | -------------- |
-| `VITE_FIREBASE_API_KEY`           | Firebase web API key                                           | Web app        |
-| `VITE_FIREBASE_AUTH_DOMAIN`       | Firebase auth domain (e.g. `your-project.firebaseapp.com`)     | Web app        |
-| `VITE_FIREBASE_PROJECT_ID`        | Firebase project ID                                            | Web + server   |
-| `VITE_FIREBASE_STORAGE_BUCKET`    | Firebase storage bucket                                        | Web app        |
-| `VITE_FIREBASE_MESSAGING_SENDER_ID` | Firebase messaging sender ID                                 | Web app        |
-| `VITE_FIREBASE_APP_ID`            | Firebase web app ID                                            | Web app        |
-| `VITE_LIVEKIT_API_KEY`            | LiveKit API key                                                | Web app        |
-| `VITE_LIVEKIT_API_SECRET`         | LiveKit API secret                                             | Web app        |
-| `VITE_LIVEKIT_SERVER_URL`         | LiveKit WebSocket URL (`wss://…`)                              | Web app        |
-| `VITE_LIVEKIT_TOKEN_SERVER`       | Token server base URL (default `http://localhost:4000`)        | Web app        |
-| `VITE_API_BASE_URL`               | Backend REST API base (default `http://localhost:3001`)        | Web app        |
-| `VITE_USE_EMULATORS`              | Force Firebase emulators outside dev builds (`true`/`false`)   | Web app        |
-| `PORT`                            | Backend server port (default `3001`)                           | Backend        |
-| `SERVER_BASE_URL`                 | Public base URL used to build signed URLs                      | Backend        |
-| `SIGNED_URL_SECRET`               | Secret used to sign upload/download URLs (change in prod!)     | Backend        |
-| `GROQ_API_KEY`                    | Groq Whisper key — preferred transcription source (free)       | Backend        |
-| `OPENAI_API_KEY`                  | Legacy OpenAI Whisper fallback (used only if Groq is unset)    | Backend        |
-| `FALLBACK_TO_MOCK`                | `"true"` to fall back to mock transcripts if transcription fails | Backend      |
-
-Live captions in the recorder use the browser **Web Speech API**, so no external
-STT/TTS/LLM keys are required for that path.
+| Variable                            | Description                                                  |
+| ----------------------------------- | ------------------------------------------------------------ |
+| `VITE_FIREBASE_API_KEY`             | Firebase web API key                                         |
+| `VITE_FIREBASE_AUTH_DOMAIN`         | Firebase auth domain                                         |
+| `VITE_FIREBASE_PROJECT_ID`          | Firebase project ID                                          |
+| `VITE_FIREBASE_STORAGE_BUCKET`      | Firebase storage bucket                                      |
+| `VITE_FIREBASE_MESSAGING_SENDER_ID` | Firebase messaging sender ID                                 |
+| `VITE_FIREBASE_APP_ID`              | Firebase web app ID                                          |
+| `VITE_API_BASE_URL`                 | Meeting Recorder API base (optional; defaults to the deployed service) |
+| `VITE_LIVEKIT_*`                    | LiveKit credentials for the real-time room features          |
+| `VITE_USE_EMULATORS`                | Force Firebase emulators outside dev builds (`true`/`false`) |
 
 ---
 
 ## Recording & Transcription Pipeline
 
-1. Tap record in the dashboard — audio is captured in the browser and **live captions**
-   stream below the button (Web Speech API, optional).
-2. On stop, the app creates a meeting, uploads the blob with a **signed URL**, and marks
-   the recording complete.
-3. The backend stores the blob and moves the meeting through
-   `Recording → Uploaded → Processing → Ready` (or `Failed`).
-4. Transcription uses **Groq Whisper** (`whisper-large-v3-turbo`) by default;
-   if `GROQ_API_KEY` is unset, it falls back to **OpenAI Whisper**.
-5. Segments are diarized into 2 speakers and labelled using your participant hints
-   (or "Speaker 1", "Speaker 2").
-6. If live captions were enabled, the on-device captions are saved as the transcript
-   immediately; the server transcription replaces/augments it in the background.
-7. Transcripts stream live to the meeting page over **SignalR** (`transcriptSegmentReady`),
-   with a polling fallback.
+**Record → upload → process → return.** The backend is the single source of truth for the
+transcript; nothing the client hears locally is ever persisted as one.
 
-If neither key is set and `FALLBACK_TO_MOCK=true`, a demo transcript is generated so you can
-try the UI without external services.
+1. **Record.** Audio is captured in the browser; a live caption preview streams below the
+   button (Web Speech API, optional, on-device only).
+2. **Upload.** On stop the app calls `POST /meetings`, then `POST /meetings/{id}/recordings`
+   with the audio as the request body. The API writes it to storage itself.
+3. **Process.** That same call starts the backend pipeline, which moves the meeting through
+   `Recording → Uploaded → Processing → Ready` (or `Failed` with a `failureReason`).
+4. **Return.** Segments arrive over SignalR (`transcriptSegmentReady` / `meetingStatusChanged`)
+   with a 2.5s status poll as fallback. The meeting page shows the current stage until the
+   transcript lands, and offers **Retry** if it failed.
 
 ---
 
-## Firebase Cloud Functions
+## API Notes
 
-Cloud Functions handle the LiveKit & AI pieces and **require the Blaze plan** to deploy.
+Quirks of the API that `src/services/api.ts` normalizes so the rest of the app never sees them:
 
-- `getLiveKitToken` — mint a LiveKit join token for an authenticated user.
-- `createInstantMeeting` / `scheduleMeeting` / `endMeeting` — meeting lifecycle.
-- `processRecording` — Firestore-triggered AI transcription pipeline (Storage → Whisper → transcript).
-- `livekitWebhook` — receives LiveKit room/participant events and updates Firestore.
+- **Enums are integers over REST, names over SignalR.** The API registers no
+  `JsonStringEnumConverter`, so `GET /meetings/{id}/status` returns `"status": 3`, while the
+  hub sends `"status": "Ready"`. `toMeetingStatus` / `toFailureReason` accept either.
+- **`MeetingStatusDto` names its key `id`, not `meetingId`.** The client renames it.
+- **`format` is case-sensitive.** `?format=Txt` works; `?format=txt` is a `400`.
+- **`participantHints` is required** on `POST /meetings` — the client always sends `[]`.
+- **The hub's `transcriptSegmentReady` sends the domain entity**, which has no `speakerLabel`,
+  unlike the REST DTO. `normalizeSegment` reconciles the two.
 
-Run them locally:
+### Endpoints used
 
-```bash
-npm run emulators    # firebase emulators:start --only functions
-```
+| Method | Endpoint                                                 |
+| ------ | -------------------------------------------------------- |
+| POST   | `/meetings`                                              |
+| GET    | `/meetings/{id}`                                         |
+| GET    | `/meetings/{id}/status`                                  |
+| POST   | `/meetings/{id}/retry?recordingId=`                      |
+| POST   | `/meetings/{id}/recordings?durationMs=&fileExtension=` (audio as body) |
+| GET    | `/meetings/{id}/recordings/{recordingId}/audio-url`      |
+| GET    | `/meetings/{id}/transcript`                              |
+| GET    | `/meetings/{id}/transcript/search?q=`                    |
+| GET    | `/meetings/{id}/export?format=Txt\|Srt\|Vtt\|Docx`       |
+| PATCH  | `/meetings/{id}/speakers/{speakerId}`                    |
 
-Deploy:
+Hub: `/hubs/meeting` — events `meetingStatusChanged`, `transcriptSegmentReady`; methods
+`JoinMeetingGroup(meetingId)`, `LeaveMeetingGroup(meetingId)`.
 
-```bash
-cd firebase/functions
-npm install
-npm run build
-npm run deploy       # firebase deploy --only functions
-```
+### The device-local library
 
-> **On the Spark (free) plan?** Skip Cloud Functions — the app falls back to
-> direct Firestore operations and the standalone token server below.
+The API is addressed strictly by id: there is **no** `GET /meetings` list, no recordings list,
+and no folder or delete endpoints. So `src/services/library.ts` keeps a localStorage index of
+the meetings recorded from this browser, and the dashboard and Recordings page are built on it,
+hydrating live status and transcript text from the API per id.
 
-### Token server (Spark-plan alternative)
+What that means in practice:
 
-Issues LiveKit JWT tokens without Cloud Functions:
+- The library **does not follow you** to another browser, device, or profile.
+- **Renaming and folders are local only** — they never reach the server.
+- **"Remove from library"** only drops the local entry; the meeting and its audio stay on the
+  server, because the API has no delete endpoint.
+- Reporting a transcription problem was dropped — there is no endpoint to receive it.
 
-```bash
-cd token-server
-cp .env.example .env   # fill in LiveKit credentials
-npm install
-npm run dev            # http://localhost:4000
-```
-
-### Voice server
-
-A minimal health-check service:
-
-```bash
-cd voice-server
-cp .env.example .env
-npm install
-npm run dev            # http://localhost:4001
-```
-
----
-
-## Flutter Mobile App
-
-A companion app located in `mobile/`:
-
-```bash
-cd mobile
-flutter pub get
-flutter run
-```
-
-- Firebase Auth, Firestore, Storage, Cloud Messaging & Functions.
-- LiveKit-based real-time rooms.
-- Local audio recording with the `record` package.
-- Riverpod/Provider state management and `go_router` navigation.
-- Dark theme, Google Fonts, and responsive layout.
-
----
-
-## API Overview
-
-All REST endpoints (except signed upload/download) require a Firebase ID token via
-`Authorization: Bearer <token>`.
-
-| Method   | Endpoint                                                       | Description                                   |
-| -------- | -------------------------------------------------------------- | --------------------------------------------- |
-| GET      | `/api/voice/health`                                            | Health check                                  |
-| GET      | `/meetings`                                                    | List the current user's meetings              |
-| POST     | `/meetings`                                                    | Create a meeting (title)                      |
-| GET      | `/meetings/:meetingId`                                         | Get one meeting                               |
-| GET      | `/meetings/:meetingId/status`                                  | Get meeting status                            |
-| GET      | `/meetings/:meetingId/recordings`                              | List recordings for a meeting                 |
-| POST     | `/meetings/:meetingId/recordings/upload-url`                   | Get a signed upload URL                       |
-| POST     | `/meetings/:meetingId/recordings/:recordingId/complete`        | Mark upload done & start processing           |
-| GET      | `/meetings/:meetingId/recordings/:recordingId/audio-url`       | Get a signed download URL                     |
-| PATCH    | `/meetings/:meetingId/recordings/:recordingId`                 | Rename, move to a folder, or complain         |
-| DELETE   | `/meetings/:meetingId/recordings/:recordingId`                 | Delete a recording                            |
-| GET      | `/recordings`                                                  | Bulk-list all recordings (with transcript text) |
-| GET      | `/folders`                                                     | List folders                                  |
-| POST     | `/folders`                                                     | Create a folder                               |
-| DELETE   | `/folders/:folderId`                                           | Delete a folder (keeps its recordings)        |
-| GET      | `/meetings/:meetingId/transcript`                              | Get the transcript                            |
-| PUT      | `/meetings/:meetingId/transcript`                              | Save a transcript (used for live captions)    |
-| GET      | `/meetings/:meetingId/transcript/search?q=`                    | Search transcript segments                    |
-| GET      | `/meetings/:meetingId/export?format=srt\|vtt\|docx\|txt`       | Download a transcript export                  |
-| PATCH    | `/meetings/:meetingId/speakers/:speakerId`                     | Rename a speaker                              |
-| PUT      | `/upload/:storageKey?exp&sig`                                  | Direct blob upload (signed URL)               |
-| GET      | `/download/:storageKey?exp&sig`                                | Direct blob download (signed URL)             |
-
-### SignalR hub
-
-- Path: `/hubs/meeting`
-- Events: `meetingStatusChanged`, `transcriptSegmentReady`
-- Methods: `JoinMeetingGroup(meetingId)`, `LeaveMeetingGroup(meetingId)`
+All of this goes away once the API grows list/delete endpoints.
 
 ---
 
 ## npm Scripts
 
-| Script               | Description                                          |
-| -------------------- | ---------------------------------------------------- |
-| `npm run dev`        | Start the Vite dev server                            |
-| `npm run dev:server` | Start the backend with hot reload (`--watch`)        |
-| `npm run build`      | Production build of the web app (to `dist/`)         |
-| `npm run start`      | Serve the production build + API from the backend    |
-| `npm run preview`    | Preview the production build                         |
-| `npm run emulators`  | Start Firebase emulators (functions only)            |
-| `npm run lint`       | Run ESLint over the project                          |
+| Script              | Description                              |
+| ------------------- | ---------------------------------------- |
+| `npm run dev`       | Start the Vite dev server                |
+| `npm run build`     | Production build of the web app (`dist/`)|
+| `npm run preview`   | Preview the production build             |
+| `npm run emulators` | Start Firebase emulators (functions only)|
+| `npm run lint`      | Run ESLint over the project              |
 
 ---
 
 ## Deployment
 
-1. **Build the web app:**
+```bash
+npm run build
+firebase deploy --only hosting
+```
 
-   ```bash
-   npm run build
-   ```
-
-2. **Deploy to Firebase Hosting** (serves `dist/` with an SPA rewrite):
-
-   ```bash
-   firebase deploy --only hosting
-   ```
-
-3. **Run the backend** in production (`NODE_ENV=production`) on your host of choice —
-   it serves both the static build and the REST API:
-
-   ```bash
-   npm run start
-   ```
-
-4. **Deploy Cloud Functions** (Blaze plan):
-
-   ```bash
-   cd firebase/functions && npm run deploy
-   ```
-
-> Set `SERVER_BASE_URL` and `VITE_API_BASE_URL` to your deployed backend URL so signed
-> upload/download URLs resolve correctly.
-
----
-
-## Security Notes
-
-- `.env` files are gitignored — never commit real secrets.
-- Change `SIGNED_URL_SECRET` to a strong random value before deploying.
-- All meeting/recording/transcript/folder endpoints enforce ownership (`ownerUid`).
-- Signed upload/download URLs are time-limited and action-bound.
-- Requests are rate-limited per IP.
-- Firebase rules for Firestore and Storage live under `firebase/`.
+The app is a static SPA — there is no server to deploy alongside it. The API allows any
+origin, so a new deployment host needs no CORS setup.
 
 ---
 
 ## Project Status
 
-Active development. The web + backend + transcription flow (recorder, live captions, folders,
-transcript editing, and export) are functional; the Flutter app and Cloud Functions are in progress.
+Active development. Record → upload → transcribe → return works end to end against the
+deployed service. Transcription runs inline in the upload request — there is no worker host
+and no broker in the request path — so the caller waits for the STT round-trip.
+
+Known gaps:
+
+1. The deployment has **no authentication middleware**: requests with no token are served as
+   `ownerId: "dev-user"`, so anyone can read or write any meeting. The client already sends a
+   Firebase bearer token; the API needs to verify it. This matters more now that the API
+   accepts any origin.
+2. Audio is stored in `musterus-api.appspot.com`, which grants `allUsers` read. Recordings are
+   downloadable by object path without a credential.
+
+Uploads are capped at 32 MiB by Cloud Run's HTTP/1 request limit — roughly 3 hours of Opus
+audio, but a hard ceiling. Because transcription is inline, the upload request also has to
+finish inside Cloud Run's 300s request timeout; a long recording will need the work moved back
+off the request path.

@@ -6,6 +6,7 @@ import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import Alert from "@mui/material/Alert";
+import CircularProgress from "@mui/material/CircularProgress";
 import IconButton from "@mui/material/IconButton";
 import TextField from "@mui/material/TextField";
 import Divider from "@mui/material/Divider";
@@ -20,10 +21,28 @@ import CheckIcon from "@mui/icons-material/Check";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import { api, ApiError } from "../services/api";
 import { MeetingHubClient } from "../services/signalr";
-import type { Meeting, Transcript, TranscriptSegment } from "../types";
+import { getEntry, updateEntry } from "../services/library";
+import type { ExportFormat, Meeting, Transcript, TranscriptSegment } from "../types";
 import AppLayout from "../components/AppLayout";
 
 type UploadState = "idle" | "processing" | "ready" | "failed";
+
+// The pipeline the backend walks a recording through after `complete`.
+const PIPELINE_COPY: Record<string, string> = {
+  Recording: "Waiting for the recording to finish uploading…",
+  Uploaded: "Audio received — queued for transcription.",
+  Processing: "Transcribing your audio. This usually takes a few seconds.",
+};
+
+// REST fallback cadence for meeting status, used only while the hub is down.
+// A flat 2.5s tick billed a Cloud Run request every 2.5s for as long as the tab
+// stayed open — ~1,400 an hour on a meeting that had already stopped changing.
+// Back off instead, sleep while the tab is hidden, and stop asking once the budget
+// is spent; the user can ask again by hand.
+const POLL_MIN_MS = 3_000;
+const POLL_MAX_MS = 30_000;
+const POLL_BACKOFF = 1.6;
+const POLL_BUDGET_MS = 10 * 60_000;
 
 function formatTimestamp(ms: number) {
   const totalSeconds = Math.floor(ms / 1000);
@@ -35,28 +54,28 @@ function formatTimestamp(ms: number) {
 function SegmentRow({
   segment,
   meetingId,
-  onSegment,
+  showSpeaker,
+  onSpeakerRenamed,
 }: {
   segment: TranscriptSegment;
   meetingId: string;
-  onSegment: (updated: TranscriptSegment) => void;
+  showSpeaker: boolean;
+  onSpeakerRenamed: (speakerId: string, label: string) => void;
 }) {
+  // Speaker fields are nullable server-side; fall back to a neutral label and
+  // disable renaming when there is no speaker id to rename.
+  const displayLabel = segment.speakerLabel ?? "Speaker";
   const [editing, setEditing] = useState(false);
-  const [label, setLabel] = useState(segment.speakerLabel);
+  const [label, setLabel] = useState(displayLabel);
   const [saving, setSaving] = useState(false);
 
   const save = async () => {
+    if (!segment.speakerId) return;
+    const next = label.trim() || displayLabel;
     setSaving(true);
     try {
-      await api.renameSpeaker(
-        meetingId,
-        segment.speakerId,
-        label.trim() || segment.speakerLabel,
-      );
-      onSegment({
-        ...segment,
-        speakerLabel: label.trim() || segment.speakerLabel,
-      });
+      await api.renameSpeaker(meetingId, segment.speakerId, next);
+      onSpeakerRenamed(segment.speakerId, next);
       setEditing(false);
     } finally {
       setSaving(false);
@@ -78,6 +97,7 @@ function SegmentRow({
         {formatTimestamp(segment.startMs)}
       </Typography>
       <Box sx={{ flex: 1, minWidth: 0 }}>
+        {showSpeaker && (
         <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
           {editing ? (
             <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
@@ -103,19 +123,25 @@ function SegmentRow({
                 variant="body2"
                 sx={{ fontWeight: 700, color: "#231D8C" }}
               >
-                {segment.speakerLabel}
+                {displayLabel}
               </Typography>
-              <IconButton
-                size="small"
-                onClick={() => setEditing(true)}
-                title="Rename speaker"
-              >
-                <EditIcon sx={{ fontSize: 14 }} />
-              </IconButton>
+              {segment.speakerId && (
+                <IconButton
+                  size="small"
+                  onClick={() => setEditing(true)}
+                  title="Rename speaker"
+                >
+                  <EditIcon sx={{ fontSize: 14 }} />
+                </IconButton>
+              )}
             </>
           )}
         </Box>
-        <Typography variant="body2" sx={{ mt: 0.5, color: "text.primary" }}>
+        )}
+        <Typography
+          variant="body2"
+          sx={{ mt: showSpeaker ? 0.5 : 0, color: "text.primary" }}
+        >
           {segment.text}
         </Typography>
       </Box>
@@ -136,8 +162,15 @@ export default function MeetingRoomPage() {
   const [activeRecordingId, setActiveRecordingId] = useState<string | null>(
     null,
   );
-  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [failureMessage, setFailureMessage] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("Txt");
 
+  // The hub is the primary update channel; polling only covers the window where it
+  // is not connected (the API runs without a SignalR backplane, so a push can land
+  // on an instance this browser is not attached to).
+  const [hubLive, setHubLive] = useState(false);
+  const [pollingExhausted, setPollingExhausted] = useState(false);
   const [meetingStatus, setMeetingStatus] = useState<string>("Recording");
   const [transcript, setTranscript] = useState<Transcript | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
@@ -154,23 +187,26 @@ export default function MeetingRoomPage() {
   }, [meetingId]);
 
   const loadMeeting = useCallback(async () => {
-    const [meet, recs, status, transcript] = await Promise.all([
+    const [meet, status, transcript] = await Promise.all([
       api.getMeeting(meetingId),
-      api.listRecordings(meetingId).catch(() => []),
       api.getMeetingStatus(meetingId),
       api.getTranscript(meetingId).catch(() => null),
     ]);
-    return { meet, recs, status, transcript };
+    // The API has no recordings-list endpoint, so the recording id comes from
+    // the local library entry written when the recording was uploaded.
+    return { meet, recordingId: getEntry(meetingId)?.recordingId ?? null, status, transcript };
   }, [meetingId]);
 
   useEffect(() => {
     let cancelled = false;
     loadMeeting()
-      .then(({ meet, recs, status, transcript }) => {
+      .then(({ meet, recordingId, status, transcript }) => {
         if (cancelled) return;
         setMeeting(meet);
         setMeetingStatus(status.status);
-        if (recs.length > 0) setActiveRecordingId(recs[0].id);
+        if (recordingId) setActiveRecordingId(recordingId);
+        // Keep the library's copy of the title in step with the server's.
+        updateEntry(meetingId, { title: meet.title });
         if (transcript) {
           setTranscript(transcript);
           setUploadState("ready");
@@ -182,6 +218,9 @@ export default function MeetingRoomPage() {
           status.status === "Processing"
         ) {
           setUploadState("processing");
+        } else if (status.status === "Failed") {
+          setUploadState("failed");
+          setFailureMessage(status.failureMessage ?? null);
         }
       })
       .catch((err) => {
@@ -194,7 +233,7 @@ export default function MeetingRoomPage() {
     return () => {
       cancelled = true;
     };
-  }, [loadMeeting, refreshTranscript]);
+  }, [loadMeeting, refreshTranscript, meetingId]);
 
   // Live updates via SignalR hub + polling fallback.
   useEffect(() => {
@@ -211,25 +250,34 @@ export default function MeetingRoomPage() {
           ) {
             setUploadState("processing");
           }
-          if (payload.status === "Failed") setUploadState("failed");
+          if (payload.status === "Failed") {
+            setUploadState("failed");
+            // Hub events carry no failure detail — fetch it over REST.
+            void api
+              .getMeetingStatus(meetingId)
+              .then((s) => setFailureMessage(s.failureMessage ?? null))
+              .catch(() => undefined);
+          }
         },
-        onSegment: (segment) => {
+        onSegments: (segments) => {
+          if (segments.length === 0) return;
           setTranscript((prev) => {
-            if (!prev) {
-              return {
-                id: "",
-                meetingId,
-                createdAt: new Date().toISOString(),
-                segments: [segment],
-              };
-            }
-            if (prev.segments.some((s) => s.id === segment.id)) return prev;
-            return { ...prev, segments: [...prev.segments, segment] };
+            const base = prev ?? {
+              id: "",
+              meetingId,
+              createdAt: new Date().toISOString(),
+              segments: [],
+            };
+            const seen = new Set(base.segments.map((s) => s.id));
+            const added = segments.filter((s) => !seen.has(s.id));
+            if (added.length === 0) return prev;
+            return { ...base, segments: [...base.segments, ...added] };
           });
         },
+        onConnectionChange: setHubLive,
       })
       .catch(() => {
-        /* hub optional; polling fallback covers it */
+        setHubLive(false);
       });
 
     return () => {
@@ -238,30 +286,83 @@ export default function MeetingRoomPage() {
     };
   }, [meetingId, refreshTranscript]);
 
-  // Polling fallback while processing.
-  useEffect(() => {
-    if (
-      uploadState !== "processing" &&
-      meetingStatus !== "Uploaded" &&
-      meetingStatus !== "Processing"
-    ) {
-      return;
+  const checkStatusOnce = useCallback(async () => {
+    const status = await api.getMeetingStatus(meetingId);
+    setMeetingStatus(status.status);
+    if (status.status === "Ready") {
+      await refreshTranscript();
+    } else if (status.status === "Failed") {
+      setUploadState("failed");
+      setFailureMessage(status.failureMessage ?? null);
     }
-    const interval = setInterval(async () => {
+    return status.status;
+  }, [meetingId, refreshTranscript]);
+
+  // Polling fallback while processing. Only runs when the hub is not delivering.
+  useEffect(() => {
+    const processing =
+      uploadState === "processing" ||
+      meetingStatus === "Uploaded" ||
+      meetingStatus === "Processing";
+    if (!processing || hubLive || pollingExhausted) return;
+
+    let cancelled = false;
+    let timer: number | undefined;
+    let delay = POLL_MIN_MS;
+    const startedAt = Date.now();
+
+    const schedule = () => {
+      if (cancelled) return;
+      timer = window.setTimeout(tick, delay);
+      delay = Math.min(Math.round(delay * POLL_BACKOFF), POLL_MAX_MS);
+    };
+
+    const tick = async () => {
+      if (cancelled) return;
+      if (Date.now() - startedAt > POLL_BUDGET_MS) {
+        // Ten minutes of Processing means something is stuck, not slow. Asking on
+        // forever only bills requests, so hand it back to the user rather than
+        // leave an abandoned tab talking to Cloud Run all day.
+        setPollingExhausted(true);
+        return;
+      }
+      // A backgrounded tab has nobody to show the answer to.
+      if (document.hidden) {
+        schedule();
+        return;
+      }
       try {
-        const status = await api.getMeetingStatus(meetingId);
-        setMeetingStatus(status.status);
-        if (status.status === "Ready") {
-          await refreshTranscript();
-        } else if (status.status === "Failed") {
-          setUploadState("failed");
-        }
+        const status = await checkStatusOnce();
+        if (cancelled || status === "Ready" || status === "Failed") return;
       } catch {
         /* keep polling */
       }
-    }, 2500);
-    return () => clearInterval(interval);
-  }, [uploadState, meetingStatus, meetingId, refreshTranscript]);
+      schedule();
+    };
+
+    const onVisibilityChange = () => {
+      if (cancelled || document.hidden) return;
+      // Returning to the tab is the one moment a fresh check is worth paying for.
+      window.clearTimeout(timer);
+      delay = POLL_MIN_MS;
+      void tick();
+    };
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    schedule();
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [
+    uploadState,
+    meetingStatus,
+    hubLive,
+    pollingExhausted,
+    checkStatusOnce,
+  ]);
 
   // Load audio playback once transcript is ready.
   useEffect(() => {
@@ -273,18 +374,51 @@ export default function MeetingRoomPage() {
     }
   }, [uploadState, activeRecordingId, audioUrl, meetingId]);
 
-  const handleExport = async (format: "srt" | "vtt" | "txt") => {
+  const handleExport = async (format: ExportFormat) => {
     const base =
       meeting?.title?.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "meeting";
-    await api.exportTranscript(meetingId, format, `${base}.${format}`);
+    await api.exportTranscript(
+      meetingId,
+      format,
+      `${base}.${format.toLowerCase()}`,
+    );
   };
 
-  const handleSegmentUpdate = (updated: TranscriptSegment) => {
+  const handleRetry = async () => {
+    if (!activeRecordingId) return;
+    setRetrying(true);
+    try {
+      await api.retryMeeting(meetingId, activeRecordingId);
+      setFailureMessage(null);
+      setMeetingStatus("Processing");
+      setUploadState("processing");
+      setPollingExhausted(false);
+    } catch (err) {
+      setFailureMessage(
+        err instanceof ApiError ? err.message : "Could not retry processing",
+      );
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  // Restarts the fallback poller after it gave up, and answers immediately so a
+  // meeting that finished while nobody was asking shows up on the first click.
+  const handleCheckAgain = () => {
+    setPollingExhausted(false);
+    void checkStatusOnce().catch(() => undefined);
+  };
+
+  // Renaming is per speaker, not per segment — relabel every segment that
+  // belongs to the renamed speaker, the same way the server does.
+  const handleSpeakerRenamed = (speakerId: string, label: string) => {
     setTranscript((prev) => {
       if (!prev) return prev;
       return {
         ...prev,
-        segments: prev.segments.map((s) => (s.id === updated.id ? updated : s)),
+        segments: prev.segments.map((s) =>
+          s.speakerId === speakerId ? { ...s, speakerLabel: label } : s,
+        ),
       };
     });
   };
@@ -315,16 +449,56 @@ export default function MeetingRoomPage() {
       </Button>
 
       <Stack spacing={3}>
-        {uploadError && (
-          <Alert severity="error" onClose={() => setUploadError(null)}>
-            {uploadError}
+        {meetingStatus === "Failed" && (
+          <Alert
+            severity="error"
+            action={
+              activeRecordingId ? (
+                <Button
+                  color="inherit"
+                  size="small"
+                  disabled={retrying}
+                  onClick={handleRetry}
+                >
+                  {retrying ? "Retrying…" : "Retry"}
+                </Button>
+              ) : undefined
+            }
+          >
+            {failureMessage
+              ? `This meeting failed to process: ${failureMessage}`
+              : "This meeting failed to process. Try recording again."}
           </Alert>
         )}
 
-        {meetingStatus === "Failed" && (
-          <Alert severity="error">
-            This meeting failed to process. Try recording again.
-          </Alert>
+        {uploadState !== "ready" && meetingStatus !== "Failed" && (
+          <Card variant="outlined">
+            <CardContent
+              sx={{ display: "flex", alignItems: "center", gap: 2, py: 3 }}
+            >
+              {!pollingExhausted && <CircularProgress size={28} />}
+              <Box sx={{ flexGrow: 1 }}>
+                <Typography variant="body1" sx={{ fontWeight: 700 }}>
+                  {pollingExhausted
+                    ? "Still processing"
+                    : meetingStatus === "Ready"
+                      ? "Finishing up…"
+                      : "Processing recording"}
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  {pollingExhausted
+                    ? "This is taking longer than usual. We stopped checking automatically — check again when you are ready."
+                    : (PIPELINE_COPY[meetingStatus] ??
+                      "Almost there — fetching the transcript.")}
+                </Typography>
+              </Box>
+              {pollingExhausted && (
+                <Button size="small" onClick={handleCheckAgain}>
+                  Check again
+                </Button>
+              )}
+            </CardContent>
+          </Card>
         )}
 
         {uploadState === "ready" && transcript && (
@@ -347,20 +521,20 @@ export default function MeetingRoomPage() {
               <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
                 <Select
                   size="small"
-                  value="txt"
+                  value={exportFormat}
                   onChange={(e) =>
-                    handleExport(e.target.value as "srt" | "vtt" | "txt")
+                    setExportFormat(e.target.value as ExportFormat)
                   }
-                  displayEmpty
                 >
-                  <MenuItem value="txt">TXT</MenuItem>
-                  <MenuItem value="srt">SRT</MenuItem>
-                  <MenuItem value="vtt">VTT</MenuItem>
+                  <MenuItem value="Txt">TXT</MenuItem>
+                  <MenuItem value="Srt">SRT</MenuItem>
+                  <MenuItem value="Vtt">VTT</MenuItem>
+                  <MenuItem value="Docx">DOCX</MenuItem>
                 </Select>
                 <Button
                   size="small"
                   startIcon={<DownloadIcon />}
-                  onClick={() => handleExport("txt")}
+                  onClick={() => handleExport(exportFormat)}
                 >
                   Download
                 </Button>
@@ -369,12 +543,16 @@ export default function MeetingRoomPage() {
 
             <Card variant="outlined">
               <CardContent sx={{ px: { xs: 2, md: 3 }, py: 1 }}>
-                {transcript.segments.map((segment) => (
+                {transcript.segments.map((segment, i) => (
                   <SegmentRow
                     key={segment.id}
                     segment={segment}
                     meetingId={meetingId}
-                    onSegment={handleSegmentUpdate}
+                    showSpeaker={
+                      i === 0 ||
+                      transcript.segments[i - 1].speakerId !== segment.speakerId
+                    }
+                    onSpeakerRenamed={handleSpeakerRenamed}
                   />
                 ))}
               </CardContent>

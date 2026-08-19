@@ -10,9 +10,29 @@ import Alert from "@mui/material/Alert";
 import MicIcon from "@mui/icons-material/Mic";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import VoiceRecorder from "../components/VoiceRecorder";
-import { api, ApiError } from "../services/api";
-import type { Meeting } from "../types";
+import { api } from "../services/api";
+import {
+  LIBRARY_UPDATED_EVENT,
+  listEntries,
+  type LibraryEntry,
+} from "../services/library";
+import type { MeetingStatus } from "../types";
 import AppLayout from "../components/AppLayout";
+
+interface Row extends LibraryEntry {
+  status: MeetingStatus | null;
+}
+
+const STATUS_COLOR: Record<
+  MeetingStatus,
+  "success" | "warning" | "error" | "default"
+> = {
+  Recording: "default",
+  Uploaded: "warning",
+  Processing: "warning",
+  Ready: "success",
+  Failed: "error",
+};
 
 function formatDate(value?: string | null) {
   if (!value) return "";
@@ -29,47 +49,51 @@ function displayTitle(value?: string | null) {
 
 export default function HomePage() {
   const navigate = useNavigate();
-  const [meetings, setMeetings] = useState<Meeting[]>([]);
+  const [meetings, setMeetings] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // The API is addressed by id only, so the list comes from the local library
+  // and each row's live status is fetched per meeting.
   const load = useCallback(async () => {
-    const list = await api.listMeetings();
-    return list;
+    const entries = listEntries();
+    return Promise.all(
+      entries.map(async (entry) => {
+        const status = await api
+          .getMeetingStatus(entry.meetingId)
+          .then((s) => s.status)
+          .catch(() => null);
+        return { ...entry, status };
+      }),
+    );
   }, []);
 
   useEffect(() => {
     let cancelled = false;
-    load()
-      .then((list) => {
-        if (cancelled) return;
-        setMeetings(list);
-        setError(null);
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setError(
-            err instanceof ApiError ? err.message : "Failed to load meetings",
-          );
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+    const run = () => {
+      load()
+        .then((rows) => {
+          if (cancelled) return;
+          setMeetings(rows);
+          setError(null);
+        })
+        .catch((err) => {
+          if (!cancelled) {
+            setError(
+              err instanceof Error ? err.message : "Failed to load meetings",
+            );
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+    };
+    run();
+    window.addEventListener(LIBRARY_UPDATED_EVENT, run);
     return () => {
       cancelled = true;
+      window.removeEventListener(LIBRARY_UPDATED_EVENT, run);
     };
-  }, [load]);
-
-  useEffect(() => {
-    const handler = () => {
-      void load()
-        .then((list) => setMeetings(list))
-        .catch(() => undefined);
-    };
-    window.addEventListener("meetflow:meetings-updated", handler);
-    return () =>
-      window.removeEventListener("meetflow:meetings-updated", handler);
   }, [load]);
 
   return (
@@ -91,13 +115,7 @@ export default function HomePage() {
               borderColor: "divider",
             }}
           >
-            <VoiceRecorder
-              onSaved={() => {
-                void load()
-                  .then(setMeetings)
-                  .catch(() => undefined);
-              }}
-            />
+            <VoiceRecorder />
           </Card>
 
           {loading ? (
@@ -143,8 +161,10 @@ export default function HomePage() {
                   >
                     {meetings.map((meeting) => (
                       <Card
-                        key={meeting.id}
-                        onClick={() => navigate("/recordings")}
+                        key={meeting.meetingId}
+                        onClick={() =>
+                          navigate(`/meeting/${meeting.meetingId}`)
+                        }
                         variant="outlined"
                         sx={{ cursor: "pointer" }}
                       >
@@ -189,8 +209,12 @@ export default function HomePage() {
                             </Box>
                             <Chip
                               size="small"
-                              label="Ready"
-                              color="success"
+                              label={meeting.status ?? "Unavailable"}
+                              color={
+                                meeting.status
+                                  ? STATUS_COLOR[meeting.status]
+                                  : "default"
+                              }
                               sx={{ flexShrink: 0 }}
                             />
                             <PlayArrowIcon

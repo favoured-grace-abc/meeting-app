@@ -9,6 +9,7 @@ import MicIcon from "@mui/icons-material/Mic";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
 import GraphicEqIcon from "@mui/icons-material/GraphicEq";
 import { api } from "../services/api";
+import { addEntry } from "../services/library";
 import { AudioRecorder } from "../services/recorder";
 
 type SaveState = "idle" | "saving" | "done" | "error";
@@ -196,48 +197,30 @@ export default function VoiceRecorder({ onSaved }: { onSaved?: () => void }) {
       const fileExtension =
         contentType.split("/")[1]?.split(";")[0]?.trim() || "webm";
 
-      const { recordingId, uploadUrl } = await api.requestUploadUrl(
+      // The audio goes through the API rather than straight to storage, and the
+      // same call starts the server pipeline (Uploaded -> Processing -> Ready).
+      // The meeting page picks the transcript up from there — on-device captions
+      // are a live preview only and are never saved as the transcript.
+      const { recordingId } = await api.uploadRecording(
         meeting.id,
-        contentType,
+        blob,
+        durationMs,
         fileExtension,
       );
-      await api.uploadBlob(uploadUrl, blob);
-      await api.completeRecording(meeting.id, recordingId, durationMs);
 
-      const spokenLines = captions
-        .map((c) => c.text.trim())
-        .filter((text) => text.length > 0);
-      if (spokenLines.length > 0) {
-        try {
-          let speakerIndex = 0;
-          let lastAt: number | null = null;
-          const segments = captions
-            .filter((c) => c.text.trim().length > 0)
-            .map((c, i) => {
-              const gap = lastAt === null ? 0 : c.at - lastAt;
-              lastAt = c.at;
-              if (i > 0 && gap > 1500) {
-                speakerIndex = (speakerIndex + 1) % 4;
-              }
-              const speakerId = `spk_${speakerIndex}`;
-              return {
-                id: `caption-${Date.now()}-${i}`,
-                speakerId,
-                speakerLabel: `Speaker ${speakerIndex + 1}`,
-                text: c.text.trim(),
-                startMs: 0,
-                endMs: 0,
-                confidence: 1,
-              };
-            });
-          await api.saveTranscript(meeting.id, segments);
-        } catch {
-          /* server transcription will cover it */
-        }
-      }
+      // The API has no list endpoint, so remember the ids locally or this
+      // meeting becomes unreachable once we navigate away. See services/library.
+      addEntry({
+        meetingId: meeting.id,
+        recordingId,
+        title: meeting.title,
+        createdAt: meeting.createdAt || new Date().toISOString(),
+        durationMs,
+        contentType,
+        folderId: null,
+      });
 
       setSaveState("done");
-      window.dispatchEvent(new Event("meetflow:meetings-updated"));
       onSaved?.();
       navigate(`/meeting/${meeting.id}`);
     } catch (err) {
@@ -341,7 +324,7 @@ export default function VoiceRecorder({ onSaved }: { onSaved?: () => void }) {
           sx={{ fontWeight: 800, color: "text.primary" }}
         >
           {saving
-            ? "Saving & transcribing…"
+            ? "Uploading…"
             : recording
               ? `Recording · ${formatClock(elapsedMs)}`
               : saveState === "done"
@@ -354,10 +337,10 @@ export default function VoiceRecorder({ onSaved }: { onSaved?: () => void }) {
           sx={{ mt: 0.5, maxWidth: 420, mx: "auto" }}
         >
           {saving
-            ? "Your audio is being uploaded and transcribed in the background."
+            ? "Your audio is uploading — transcription starts as soon as it lands."
             : recording
               ? "Tap again to stop. Your recording will be saved automatically."
-              : "Tap the circle to start recording — live transcription appears below."}
+              : "Tap the circle to start recording — a live preview appears below."}
         </Typography>
         {recording && (
           <Chip
@@ -427,8 +410,8 @@ export default function VoiceRecorder({ onSaved }: { onSaved?: () => void }) {
             sx={{ textAlign: "center", py: 2 }}
           >
             {recording
-              ? "Speak now — live transcription will appear here."
-              : "Live transcription will appear here while you record."}
+              ? "Speak now — a live preview will appear here."
+              : "A live preview appears here while you record. The saved transcript comes from the server after upload."}
           </Typography>
         )}
       </Box>

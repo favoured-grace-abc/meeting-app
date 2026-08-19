@@ -1,11 +1,29 @@
 import * as signalR from '@microsoft/signalr';
 import { auth } from './firebase';
-import { API_BASE_URL } from './api';
+import { API_BASE_URL, normalizeSegment, toMeetingStatus } from './api';
 import type { MeetingStatusPayload, TranscriptSegment } from '../types';
+
+/**
+ * What the hub actually sends. `meetingStatusChanged` carries only the id and a
+ * stringified status — no failure detail, unlike the REST status endpoint — and
+ * `transcriptSegmentsReady` carries domain entities, which have no speakerLabel.
+ */
+interface RawStatusPayload {
+  meetingId: string;
+  status: unknown;
+}
+
+type RawSegment = Parameters<typeof normalizeSegment>[0];
 
 export interface MeetingHubHandlers {
   onStatus?: (payload: MeetingStatusPayload) => void;
-  onSegment?: (segment: TranscriptSegment) => void;
+  onSegments?: (segments: TranscriptSegment[]) => void;
+  /**
+   * Fires whenever the connection goes live or drops, including across automatic
+   * reconnects. Callers use it to decide whether the REST polling fallback is
+   * needed — while the hub is live, polling is pure duplicate traffic.
+   */
+  onConnectionChange?: (connected: boolean) => void;
 }
 
 export class MeetingHubClient {
@@ -27,16 +45,39 @@ export class MeetingHubClient {
       .withAutomaticReconnect()
       .build();
 
-    connection.on('meetingStatusChanged', (payload: MeetingStatusPayload) => {
-      handlers.onStatus?.(payload);
+    connection.on('meetingStatusChanged', (payload: RawStatusPayload) => {
+      handlers.onStatus?.({
+        meetingId: payload.meetingId,
+        status: toMeetingStatus(payload.status),
+        failureReason: 'None',
+        failureMessage: null,
+      });
     });
-    connection.on('transcriptSegmentReady', (segment: TranscriptSegment) => {
-      handlers.onSegment?.(segment);
+    connection.on('transcriptSegmentsReady', (segments: RawSegment[]) => {
+      handlers.onSegments?.((segments ?? []).map(normalizeSegment));
     });
+    // Older API builds pushed one message per segment. Harmless to keep listening.
+    connection.on('transcriptSegmentReady', (segment: RawSegment) => {
+      handlers.onSegments?.([normalizeSegment(segment)]);
+    });
+
+    connection.onreconnecting(() => handlers.onConnectionChange?.(false));
+    connection.onreconnected(async () => {
+      // Group membership does not survive a reconnect — the server sees a new
+      // connection id — so rejoin before reporting the hub as live again.
+      try {
+        await connection.invoke('JoinMeetingGroup', meetingId);
+        handlers.onConnectionChange?.(true);
+      } catch {
+        handlers.onConnectionChange?.(false);
+      }
+    });
+    connection.onclose(() => handlers.onConnectionChange?.(false));
 
     this.connection = connection;
     await connection.start();
     await connection.invoke('JoinMeetingGroup', meetingId);
+    handlers.onConnectionChange?.(true);
   }
 
   async disconnect(): Promise<void> {
