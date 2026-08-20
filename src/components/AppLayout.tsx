@@ -14,7 +14,6 @@ import ListItem from "@mui/material/ListItem";
 import ListItemButton from "@mui/material/ListItemButton";
 import ListItemIcon from "@mui/material/ListItemIcon";
 import ListItemText from "@mui/material/ListItemText";
-import MicIcon from "@mui/icons-material/Mic";
 import GridViewIcon from "@mui/icons-material/GridView";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import SettingsIcon from "@mui/icons-material/Settings";
@@ -24,38 +23,6 @@ import type { ReactNode } from "react";
 import { useAuth } from "../context/authContext";
 
 const DRAWER_WIDTH = 250;
-
-export function BrandLogo() {
-  const [broken, setBroken] = useState(false);
-
-  if (broken) {
-    return (
-      <Box
-        sx={{
-          width: 48,
-          height: 48,
-          borderRadius: 2,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          bgcolor: "primary.main",
-        }}
-      >
-        <MicIcon sx={{ color: "#fff", fontSize: 26 }} />
-      </Box>
-    );
-  }
-
-  return (
-    <Box
-      component="img"
-      src="/favicon.svg"
-      alt="MeetFlow logo"
-      onError={() => setBroken(true)}
-      sx={{ width: 48, height: 48, borderRadius: 2, objectFit: "contain" }}
-    />
-  );
-}
 
 interface NavItem {
   label: string;
@@ -207,7 +174,6 @@ export default function AppLayout({ children }: { children: ReactNode }) {
           >
             <MenuIcon />
           </IconButton>
-          <BrandLogo />
           <Typography
             variant="h6"
             sx={{
